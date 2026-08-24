@@ -832,7 +832,11 @@ func cleanRemarks(s string) string {
     s = strings.ReplaceAll(s, "#", "")
     s = strings.ReplaceAll(s, "\n", " ")
     s = strings.ReplaceAll(s, "\r", "")
-    return strings.TrimSpace(s)
+    s = strings.TrimSpace(s)
+    // فاصله و | در fragment URI مشکل‌سازند — با کاراکترهای امن جایگزین می‌شوند
+    s = strings.ReplaceAll(s, " ", "_")
+    s = strings.ReplaceAll(s, "|", "-")
+    return s
 }
 
 func formatQuery(q url.Values) string {
