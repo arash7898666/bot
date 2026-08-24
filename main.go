@@ -1,6 +1,7 @@
 package main
 
 import (
+    "archive/zip"
     "bytes"
     "encoding/base64"
     "encoding/hex"
@@ -18,6 +19,8 @@ import (
 
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
+
+const botVersion = "3.0-UNIVERSAL"
 
 const (
     msgLimit  = 3900
@@ -49,7 +52,7 @@ func main() {
         log.Fatalf("❌ اتصال به Bot API ناموفق: %v", err)
     }
     bot.Debug = os.Getenv("DEBUG") == "1"
-    log.Printf("✅ ربات @%s روشن شد", bot.Self.UserName)
+    log.Printf("✅ ربات @%s روشن شد — نسخه %s", bot.Self.UserName, botVersion)
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
@@ -84,6 +87,8 @@ func handleMessage(msg *tgbotapi.Message) {
         switch msg.Command() {
         case "start", "help":
             sendHTML(chatID, helpText())
+        case "version":
+            reply(chatID, "🤖 نسخه ربات: "+botVersion)
         default:
             reply(chatID, "❓ دستور ناشناخته. /help را بزنید.")
         }
@@ -128,15 +133,15 @@ func handleMessage(msg *tgbotapi.Message) {
 
     res, err := processInput(data)
     if err != nil {
-        reply(chatID, "❌ "+err.Error())
+        reply(chatID, "❌ "+err.Error()+"\n\n🤖 "+botVersion)
         return
     }
 
     if len(res.URIs) == 0 && len(res.Raw) == 0 {
         if len(res.Errors) > 0 {
-            reply(chatID, "⚠️ هیچ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n"))
+            reply(chatID, "⚠️ هیچ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n")+"\n\n🤖 "+botVersion)
         } else {
-            reply(chatID, "⚠️ در این ورودی کانفیگی پیدا نشد.")
+            reply(chatID, "⚠️ در این ورودی کانفیگی پیدا نشد.\n\n🤖 "+botVersion)
         }
         return
     }
@@ -153,8 +158,9 @@ func handleMessage(msg *tgbotapi.Message) {
         summary += fmt.Sprintf(" • %d بلوک خام", len(res.Raw))
     }
     if len(res.Errors) > 0 {
-        summary += fmt.Sprintf("\n⚠️ %d بلوک ناموفق", len(res.Errors))
+        summary += fmt.Sprintf("\n⚠️ %d بلوک نادیده (متادیتا/ناموفق)", len(res.Errors))
     }
+    summary += "\n🤖 نسخه " + botVersion
 
     switch {
     case len(content) <= msgLimit:
@@ -244,16 +250,22 @@ func replyLines(chatID int64, lines []string) {
 }
 
 func helpText() string {
-    return `🔐 <b>ربات رمزگشای NPVT</b>
+    return `🔐 <b>ربات رمزگشای NPVT</b> — نسخه <code>` + botVersion + `</code>
 
-فایل‌های <code>.npvt</code> اپلیکیشن NapsternetV را رمزگشایی کرده و کانفیگ‌های V2ray را استخراج می‌کنم.
+فایل‌های <code>.npvt</code> را رمزگشایی و کانفیگ‌ها را استخراج می‌کنم.
 
-📤 <b>نحوه استفاده:</b>
-• فایل <code>.npvt</code> را بفرستید
-• یا محتوای فایل را به‌صورت متن پیام کنید
+📤 <b>ورودی‌های پشتیبانی‌شده:</b>
+• فایل <code>.npvt</code> (رمزگشایی White-Box)
+• فایل <code>.ehi</code> یا هر ZIP حاوی JSON
+• JSON مستقیم (v2box / sing-box / v2ray)
+• متن base64 یا لینک‌های خام
 
-✨ <b>خروجی:</b> لینک‌های <code>vless://</code> <code>vmess://</code> <code>trojan://</code> <code>ss://</code> <code>hy2://</code> <code>tuic://</code> — قابل ایمپورت در v2rayNG / Hiddify / NapsternetV و مشابه آنها.`
+✨ <b>خروجی:</b> <code>vless://</code> <code>vmess://</code> <code>trojan://</code> <code>ss://</code> <code>hy2://</code> <code>tuic://</code>
+
+/version → نمایش نسخه ربات`
 }
+
+// ═══════════════════ موتور پردازش یونیورسال ═══════════════════
 
 type processResult struct {
     URIs   []string
@@ -265,55 +277,238 @@ func processInput(data []byte) (*processResult, error) {
     if len(data) > 50*1024*1024 {
         return nil, fmt.Errorf("ورودی بیش از حد بزرگ است")
     }
+    return processUniversal(data, 0)
+}
 
-    blobs, decodeErrs, err := loadBlobs(data)
-    if err != nil {
-        return nil, err
+func processUniversal(data []byte, depth int) (*processResult, error) {
+    // ۱) فایل ZIP (مثل .ehi)
+    if len(data) > 4 && data[0] == 'P' && data[1] == 'K' && depth < 3 {
+        return processZIP(data, depth)
     }
 
-    res := &processResult{Errors: decodeErrs}
+    text := strings.TrimSpace(string(data))
+    if text == "" {
+        return nil, fmt.Errorf("محتوای ورودی خالی است")
+    }
 
-    for i, blob := range blobs {
-        if len(blob) < 16 {
-            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: کوتاه‌تر از ۱۶ بایت (بدون nonce) است.", i+1))
+    // ۲) JSON مستقیم
+    if text[0] == '{' || text[0] == '[' {
+        res := &processResult{}
+        consumeJSONBlob([]byte(text), res)
+        return res, nil
+    }
+
+    // ۳) مسیر NPVT (توکن‌های NPVT یا کاما-جدا)
+    npvtRes := tryNPVT(text)
+    if npvtRes != nil && (len(npvtRes.URIs) > 0 || len(npvtRes.Raw) > 0) {
+        return npvtRes, nil
+    }
+
+    // ۴) base64 → محتوا
+    if b, ok := decodeB64Loose(text); ok {
+        inner := strings.TrimSpace(string(b))
+        if inner != "" && (inner[0] == '{' || inner[0] == '[') {
+            res := &processResult{}
+            consumeJSONBlob(b, res)
+            if len(res.URIs) > 0 || len(res.Raw) > 0 {
+                return res, nil
+            }
+        }
+        if uris := scanPlainURIs(b); len(uris) > 0 {
+            return &processResult{URIs: uris}, nil
+        }
+    }
+
+    // ۵) اسکن URI خام
+    if uris := scanPlainURIs([]byte(text)); len(uris) > 0 {
+        return &processResult{URIs: uris}, nil
+    }
+
+    if npvtRes != nil && len(npvtRes.Errors) > 0 {
+        return nil, fmt.Errorf("رمزگشایی ناموفق:\n%s", strings.Join(npvtRes.Errors, "\n"))
+    }
+    return nil, fmt.Errorf("هیچ فرمت شناخته‌شده‌ای در ورودی پیدا نشد")
+}
+
+func processZIP(data []byte, depth int) (*processResult, error) {
+    zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+    if err != nil {
+        return nil, fmt.Errorf("فایل ZIP نامعتبر است: %v", err)
+    }
+    res := &processResult{}
+    for _, f := range zr.File {
+        if f.FileInfo().IsDir() {
             continue
         }
-        pt, derr := decrypt(blob)
+        rc, err := f.Open()
+        if err != nil {
+            continue
+        }
+        content, _ := io.ReadAll(io.LimitReader(rc, 20<<20))
+        rc.Close()
+
+        if len(content) > 4 && content[0] == 'P' && content[1] == 'K' && depth < 3 {
+            if sub, err := processZIP(content, depth+1); err == nil {
+                res.URIs = append(res.URIs, sub.URIs...)
+                res.Raw = append(res.Raw, sub.Raw...)
+                res.Errors = append(res.Errors, sub.Errors...)
+            }
+            continue
+        }
+
+        inner := strings.TrimSpace(string(content))
+        if inner == "" {
+            continue
+        }
+        if inner[0] == '{' || inner[0] == '[' {
+            consumeJSONBlob(content, res)
+            continue
+        }
+        if uris := scanPlainURIs(content); len(uris) > 0 {
+            res.URIs = append(res.URIs, uris...)
+            continue
+        }
+        if sub, err := processUniversal(content, depth+1); err == nil {
+            res.URIs = append(res.URIs, sub.URIs...)
+            res.Raw = append(res.Raw, sub.Raw...)
+        }
+    }
+    return res, nil
+}
+
+// ═══════════════════ مسیر NPVT ═══════════════════
+
+func tryNPVT(text string) *processResult {
+    res := &processResult{}
+
+    tokens := strings.Split(text, ",")
+    if len(tokens) <= 1 {
+        tokens = strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' })
+    }
+
+    decoded := 0
+    for i, tok := range tokens {
+        tok = strings.TrimSpace(tok)
+        if tok == "" {
+            continue
+        }
+        b, err := decodeOne(tok)
+        if err != nil {
+            continue
+        }
+        decoded++
+        if len(b) < 16 {
+            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: کوتاه‌تر از ۱۶ بایت.", i+1))
+            continue
+        }
+        pt, derr := decrypt(b)
         if derr != nil {
             res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: %v", i+1, derr))
             continue
         }
-        uris := processBlob(pt)
-        if len(uris) == 0 {
-            if !isMostlyPrintable(pt) {
-                preview := make([]byte, 0, 80)
-                for j, b := range pt {
-                    if j >= 80 {
-                        break
-                    }
-                    if b >= 0x20 && b < 0x7F {
-                        preview = append(preview, b)
-                    } else {
-                        preview = append(preview, '.')
-                    }
+        if !isMostlyPrintable(pt) {
+            preview := make([]byte, 0, 80)
+            for j, bb := range pt {
+                if j >= 80 {
+                    break
                 }
-                res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: خروجی نامعتبر — پیش‌نمایش: %s", i+1, string(preview)))
-                continue
+                if bb >= 0x20 && bb < 0x7F {
+                    preview = append(preview, bb)
+                } else {
+                    preview = append(preview, '.')
+                }
             }
-            var pretty bytes.Buffer
-            if jerr := json.Indent(&pretty, pt, "", "  "); jerr == nil && pretty.Len() > 0 {
-                res.Raw = append(res.Raw, pretty.String())
-            } else if s := strings.TrimSpace(string(pt)); s != "" {
-                res.Raw = append(res.Raw, s)
-            }
+            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: خروجی نامعتبر — %s", i+1, string(preview)))
             continue
         }
-        res.URIs = append(res.URIs, uris...)
+        consumeJSONBlob(pt, res)
     }
 
+    if decoded == 0 {
+        return nil
+    }
     res.URIs = dedupe(res.URIs)
     res.Raw = dedupe(res.Raw)
-    return res, nil
+    return res
+}
+
+// ═══════════════════ مصرف JSON ═══════════════════
+
+func consumeJSONBlob(pt []byte, res *processResult) {
+    pt = trimNonPrintable(pt)
+    if len(pt) == 0 {
+        return
+    }
+
+    // کل سند یک JSON؟
+    var root any
+    if err := json.Unmarshal(pt, &root); err == nil {
+        if isNoiseJSON(root) {
+            res.Errors = append(res.Errors, "یک بلوک متادیتای قفل (بدون کانفیگ) نادیده گرفته شد")
+            return
+        }
+        var uris []string
+        walkJSON(root, &uris)
+        if len(uris) > 0 {
+            res.URIs = append(res.URIs, uris...)
+            return
+        }
+        // JSON معتبر ولی بدون کانفیگ → خام
+        if s := strings.TrimSpace(string(pt)); s != "" {
+            res.Raw = append(res.Raw, s)
+        }
+        return
+    }
+
+    // چند سند JSON پشت‌سرهم
+    objs := splitJSONObjects(pt)
+    if len(objs) > 1 {
+        foundAny := false
+        for _, obj := range objs {
+            var r any
+            if json.Unmarshal(obj, &r) != nil {
+                continue
+            }
+            if isNoiseJSON(r) {
+                continue
+            }
+            var uris []string
+            walkJSON(r, &uris)
+            if len(uris) > 0 {
+                res.URIs = append(res.URIs, uris...)
+                foundAny = true
+            }
+        }
+        if foundAny {
+            return
+        }
+    }
+
+    // متن حاوی URI؟
+    if uris := scanPlainURIs(pt); len(uris) > 0 {
+        res.URIs = append(res.URIs, uris...)
+        return
+    }
+
+    if s := strings.TrimSpace(string(pt)); s != "" {
+        res.Raw = append(res.Raw, s)
+    }
+}
+
+// بلوک‌هایی که فقط قفل/تبلیغ هستند و کانفیگ ندارند
+func isNoiseJSON(root any) bool {
+    m, ok := root.(map[string]any)
+    if !ok {
+        return false
+    }
+    if _, hasLock := m["isLocked"]; !hasLock {
+        return false
+    }
+    _, hasServer := m["server"]
+    _, hasProfile := m["v2rayProfile"]
+    _, hasOutbounds := m["outbounds"]
+    _, hasCfg := m["configType"]
+    return !hasServer && !hasProfile && !hasOutbounds && !hasCfg
 }
 
 func dedupe(in []string) []string {
@@ -342,48 +537,6 @@ func isMostlyPrintable(b []byte) bool {
         }
     }
     return bad < len(b)/4
-}
-
-func loadBlobs(raw []byte) ([][]byte, []string, error) {
-    text := strings.TrimSpace(string(raw))
-    if text == "" {
-        return nil, nil, fmt.Errorf("محتوای ورودی خالی است")
-    }
-
-    blobs, errs := decodeTokens(strings.Split(text, ","))
-
-    if len(blobs) == 0 && strings.ContainsAny(text, "\n\r") {
-        lines := strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' })
-        if b2, e2 := decodeTokens(lines); len(b2) > 0 {
-            blobs, errs = b2, append(errs, e2...)
-        }
-    }
-
-    if len(blobs) == 0 {
-        if len(errs) > 0 {
-            return nil, errs, fmt.Errorf("هیچ توکنی قابل رمزگشایی نبود:\n%s", strings.Join(errs, "\n"))
-        }
-        return nil, errs, fmt.Errorf("دادهٔ قابل پردازشی پیدا نشد")
-    }
-    return blobs, errs, nil
-}
-
-func decodeTokens(tokens []string) ([][]byte, []string) {
-    var blobs [][]byte
-    var errs []string
-    for i, tok := range tokens {
-        tok = strings.TrimSpace(tok)
-        if tok == "" {
-            continue
-        }
-        b, err := decodeOne(tok)
-        if err != nil {
-            errs = append(errs, fmt.Sprintf("توکن %d: %v", i+1, err))
-            continue
-        }
-        blobs = append(blobs, b)
-    }
-    return blobs, errs
 }
 
 func decodeOne(text string) ([]byte, error) {
@@ -421,8 +574,106 @@ func decodeOne(text string) ([]byte, error) {
         return b, nil
     }
 
-    return nil, fmt.Errorf("قالب توکن شناسایی نشد (hex/base64): %.32s…", text)
+    return nil, fmt.Errorf("قالب توکن شناسایی نشد: %.32s…", text)
 }
+
+func decodeB64Loose(text string) ([]byte, bool) {
+    text = strings.Join(strings.Fields(text), "")
+    if text == "" || len(text) < 8 {
+        return nil, false
+    }
+    padded := text
+    if m := len(padded) % 4; m != 0 {
+        padded += strings.Repeat("=", 4-m)
+    }
+    if b, err := base64.StdEncoding.DecodeString(padded); err == nil {
+        return b, true
+    }
+    if b, err := base64.URLEncoding.DecodeString(padded); err == nil {
+        return b, true
+    }
+    if b, err := base64.RawStdEncoding.DecodeString(text); err == nil {
+        return b, true
+    }
+    return nil, false
+}
+
+func trimNonPrintable(b []byte) []byte {
+    start := 0
+    for start < len(b) && (b[start] < 0x20 || b[start] == 0x00) && b[start] != '\n' && b[start] != '\r' && b[start] != '\t' {
+        start++
+    }
+    end := len(b)
+    for end > start && (b[end-1] < 0x20 || b[end-1] == 0x00) && b[end-1] != '\n' && b[end-1] != '\r' && b[end-1] != '\t' {
+        end--
+    }
+    return b[start:end]
+}
+
+func splitJSONObjects(data []byte) [][]byte {
+    var objects [][]byte
+    depth := 0
+    start := -1
+    inString := false
+    escaped := false
+    for i, b := range data {
+        if escaped {
+            escaped = false
+            continue
+        }
+        if b == '\\' {
+            escaped = true
+            continue
+        }
+        if b == '"' {
+            inString = !inString
+            continue
+        }
+        if inString {
+            continue
+        }
+        switch b {
+        case '{':
+            if depth == 0 {
+                start = i
+            }
+            depth++
+        case '}':
+            depth--
+            if depth == 0 && start >= 0 {
+                objects = append(objects, data[start:i+1])
+                start = -1
+            }
+        }
+    }
+    return objects
+}
+
+var uriSchemes = []string{
+    "vless://", "vmess://", "trojan://", "ss://", "ssr://",
+    "hysteria2://", "hy2://", "hysteria://", "tuic://",
+    "socks://", "socks5://",
+}
+
+func scanPlainURIs(pt []byte) []string {
+    s := string(pt)
+    if !strings.Contains(s, "://") {
+        return nil
+    }
+    var uris []string
+    for _, f := range strings.Fields(s) {
+        f = strings.TrimRight(f, ",;")
+        for _, sc := range uriSchemes {
+            if strings.HasPrefix(f, sc) {
+                uris = append(uris, f)
+                break
+            }
+        }
+    }
+    return uris
+}
+
+// ═══════════════════ رمزنگاری NPVT ═══════════════════
 
 const nr = 2
 
@@ -550,111 +801,7 @@ func ctrIncrement(counter *[16]byte) {
     }
 }
 
-func processBlob(pt []byte) []string {
-    pt = trimNonPrintable(pt)
-
-    var root any
-    if err := json.Unmarshal(pt, &root); err == nil {
-        var uris []string
-        walkJSON(root, &uris)
-        if len(uris) > 0 {
-            return uris
-        }
-    }
-
-    var allURIs []string
-    for _, obj := range splitJSONObjects(pt) {
-        var r any
-        if err := json.Unmarshal(obj, &r); err == nil {
-            var uris []string
-            walkJSON(r, &uris)
-            allURIs = append(allURIs, uris...)
-        }
-    }
-    if len(allURIs) > 0 {
-        return allURIs
-    }
-
-    if sub, err := extractURIsFromConfig(pt); err == nil && len(sub) > 0 {
-        return sub
-    }
-    return scanPlainURIs(pt)
-}
-
-func trimNonPrintable(b []byte) []byte {
-    start := 0
-    for start < len(b) && (b[start] < 0x20 || b[start] == 0x00) && b[start] != '\n' && b[start] != '\r' && b[start] != '\t' {
-        start++
-    }
-    end := len(b)
-    for end > start && (b[end-1] < 0x20 || b[end-1] == 0x00) && b[end-1] != '\n' && b[end-1] != '\r' && b[end-1] != '\t' {
-        end--
-    }
-    return b[start:end]
-}
-
-func splitJSONObjects(data []byte) [][]byte {
-    var objects [][]byte
-    depth := 0
-    start := -1
-    inString := false
-    escaped := false
-    for i, b := range data {
-        if escaped {
-            escaped = false
-            continue
-        }
-        if b == '\\' {
-            escaped = true
-            continue
-        }
-        if b == '"' {
-            inString = !inString
-            continue
-        }
-        if inString {
-            continue
-        }
-        switch b {
-        case '{':
-            if depth == 0 {
-                start = i
-            }
-            depth++
-        case '}':
-            depth--
-            if depth == 0 && start >= 0 {
-                objects = append(objects, data[start:i+1])
-                start = -1
-            }
-        }
-    }
-    return objects
-}
-
-var uriSchemes = []string{
-    "vless://", "vmess://", "trojan://", "ss://", "ssr://",
-    "hysteria2://", "hy2://", "hysteria://", "tuic://",
-    "socks://", "socks5://",
-}
-
-func scanPlainURIs(pt []byte) []string {
-    s := string(pt)
-    if !strings.Contains(s, "://") {
-        return nil
-    }
-    var uris []string
-    for _, f := range strings.Fields(s) {
-        f = strings.TrimRight(f, ",;")
-        for _, sc := range uriSchemes {
-            if strings.HasPrefix(f, sc) {
-                uris = append(uris, f)
-                break
-            }
-        }
-    }
-    return uris
-}
+// ═══════════════════ پیمایش JSON ═══════════════════
 
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
@@ -685,11 +832,6 @@ func walkJSON(v any, uris *[]string) {
             if u, err := extractFromV2rayProfile(b); err == nil {
                 *uris = append(*uris, u...)
             }
-        } else if _, ok := x["configType"]; ok {
-            b, _ := json.Marshal(x)
-            if u, err := extractFromV2rayProfile(b); err == nil {
-                *uris = append(*uris, u...)
-            }
         }
         for _, v := range x {
             walkJSON(v, uris)
@@ -700,6 +842,8 @@ func walkJSON(v any, uris *[]string) {
         }
     }
 }
+
+// ═══════════════════ struct ها ═══════════════════
 
 type tlsSettingsT struct {
     ServerName    string   `json:"serverName"`
@@ -833,7 +977,6 @@ func cleanRemarks(s string) string {
     s = strings.ReplaceAll(s, "\n", " ")
     s = strings.ReplaceAll(s, "\r", "")
     s = strings.TrimSpace(s)
-    // فاصله و | در fragment URI مشکل‌سازند — با کاراکترهای امن جایگزین می‌شوند
     s = strings.ReplaceAll(s, " ", "_")
     s = strings.ReplaceAll(s, "|", "-")
     return s
