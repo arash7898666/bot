@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "6.0-EHI-V2RAY"
+const botVersion = "6.2-SLIP-VLESS"
 
 const (
     msgLimit  = 3900
@@ -116,6 +116,36 @@ func channelStatus() string {
     return settings.ForceChannel
 }
 
+// ═══════════════════ منوی دستورات (دکمه همبرگری ☰) ═══════════════════
+
+func setBotCommands() {
+    publicCmds := []tgbotapi.BotCommand{
+        {Command: "start", Description: "🚀 شروع و راهنمای ربات"},
+        {Command: "help", Description: "📖 راهنمای استفاده"},
+        {Command: "version", Description: "🤖 نمایش نسخه ربات"},
+        {Command: "channel", Description: "📢 وضعیت جوین اجباری"},
+    }
+    if _, err := bot.Request(tgbotapi.NewSetMyCommands(publicCmds...)); err != nil {
+        log.Printf("⚠️ ثبت منوی عمومی ناموفق: %v", err)
+        return
+    }
+
+    adminCmds := append(append([]tgbotapi.BotCommand{}, publicCmds...),
+        tgbotapi.BotCommand{Command: "setchannel", Description: "⚙️ تنظیم کانال اجباری"},
+        tgbotapi.BotCommand{Command: "stats", Description: "📊 آمار ربات"},
+        tgbotapi.BotCommand{Command: "broadcast", Description: "📣 ارسال پیام همگانی"},
+    )
+    cmdsJSON, _ := json.Marshal(adminCmds)
+    for id := range adminIDs {
+        params := tgbotapi.Params{}
+        params["commands"] = string(cmdsJSON)
+        params["scope"] = fmt.Sprintf(`{"type":"chat","chat_id":%d}`, id)
+        if _, err := bot.MakeRequest("setMyCommands", params); err != nil {
+            log.Printf("⚠️ ثبت منوی ادمین برای %d ناموفق: %v", id, err)
+        }
+    }
+}
+
 // ═══════════════════ اصلی ═══════════════════
 
 func main() {
@@ -139,6 +169,7 @@ func main() {
         log.Fatalf("❌ اتصال به Bot API ناموفق: %v", err)
     }
     bot.Debug = os.Getenv("DEBUG") == "1"
+    setBotCommands()
     log.Printf("✅ ربات @%s روشن شد — نسخه %s — کانال اجباری: %s",
         bot.Self.UserName, botVersion, channelStatus())
 
@@ -242,7 +273,6 @@ func handleMessage(msg *tgbotapi.Message) {
 
     case strings.TrimSpace(msg.Text) != "":
         txt := strings.TrimSpace(msg.Text)
-        // لینک‌های مخفی (TextLink) داخل پیام‌های فورواردشده هم جمع شوند
         if len(msg.Entities) > 0 {
             var extra []string
             for _, e := range msg.Entities {
@@ -299,8 +329,14 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
+    // ─── کانفیگ‌ها با خط فاصله از هم جدا می‌شوند ───
     var lines []string
-    lines = append(lines, res.URIs...)
+    for i, u := range res.URIs {
+        if i > 0 {
+            lines = append(lines, "")
+        }
+        lines = append(lines, u)
+    }
     for _, r := range res.Raw {
         lines = append(lines, "", "─────── RAW ───────", r)
     }
@@ -517,14 +553,14 @@ func helpText() string {
 • <code>.ehi</code> — HTTP Injector
 • <code>.hat</code> — HA Tunnel Plus
 • <code>.happ</code> — Happ (+ لینک happ://)
-• <code>.slip</code> — SlipNet (+ باندل رمزدار)
+• <code>.slip</code> — SlipNet (+ باندل رمزدار + VLESS)
 • <code>.nm</code> — NetMod
 • <code>.dark</code> — DarkTunnel
 • JSON مستقیم / base64 / ZIP
 
 ✨ <b>خروجی:</b> <code>vless:// vmess:// trojan:// ss:// hy2:// tuic://</code>
 
-ℹ️ کانفیگ‌های SSH/Tunnel (بدون V2ray) به‌صورت JSON کامل در RAW برگردانده می‌شوند — این کانفیگ‌ها فقط در اپ خودشان کار می‌کنند و لینک V2ray ندارند.
+ℹ️ کانفیگ‌های SSH/Tunnel (بدون V2ray) به‌صورت JSON کامل در RAW برگردانده می‌شوند.
 
 /version → نسخه ربات
 /channel → وضعیت کانال`
@@ -1061,7 +1097,6 @@ func ctrIncrement(counter *[16]byte) {
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
-        // فیلد V2ray در NapsternetV و کانفیگ‌های عمومی
         if raw, ok := x["v2rayJson"]; ok {
             switch c := raw.(type) {
             case string:
@@ -1077,7 +1112,6 @@ func walkJSON(v any, uris *[]string) {
                 }
             }
         }
-        // فیلد V2ray در HTTP Injector (.ehi)
         if raw, ok := x["v2rRawJson"]; ok {
             switch c := raw.(type) {
             case string:
