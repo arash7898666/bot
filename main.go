@@ -288,7 +288,18 @@ func processInput(data []byte) (*processResult, error) {
         uris := processBlob(pt)
         if len(uris) == 0 {
             if !isMostlyPrintable(pt) {
-                res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: خروجی رمزگشایی نامعتبر بود.", i+1))
+                preview := make([]byte, 0, 80)
+                for j, b := range pt {
+                    if j >= 80 {
+                        break
+                    }
+                    if b >= 0x20 && b < 0x7F {
+                        preview = append(preview, b)
+                    } else {
+                        preview = append(preview, '.')
+                    }
+                }
+                res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: خروجی نامعتبر — پیش‌نمایش: %s", i+1, string(preview)))
                 continue
             }
             var pretty bytes.Buffer
@@ -378,7 +389,10 @@ func decodeTokens(tokens []string) ([][]byte, []string) {
 }
 
 func decodeOne(text string) ([]byte, error) {
-    text = strings.ReplaceAll(text, "NPVT1", "")
+    // حذف هر پیشوند NPVT با هر شماره‌ای (NPVT0 تا NPVT9)
+    for c := '0'; c <= '9'; c++ {
+        text = strings.ReplaceAll(text, "NPVT"+string(c), "")
+    }
     text = strings.Join(strings.Fields(text), "")
     if text == "" {
         return nil, fmt.Errorf("توکن خالی")
@@ -540,6 +554,8 @@ func ctrIncrement(counter *[16]byte) {
 }
 
 func processBlob(pt []byte) []string {
+    pt = trimNonPrintable(pt)
+
     var root any
     if err := json.Unmarshal(pt, &root); err == nil {
         var uris []string
@@ -548,10 +564,75 @@ func processBlob(pt []byte) []string {
             return uris
         }
     }
+
+    var allURIs []string
+    for _, obj := range splitJSONObjects(pt) {
+        var r any
+        if err := json.Unmarshal(obj, &r); err == nil {
+            var uris []string
+            walkJSON(r, &uris)
+            allURIs = append(allURIs, uris...)
+        }
+    }
+    if len(allURIs) > 0 {
+        return allURIs
+    }
+
     if sub, err := extractURIsFromConfig(pt); err == nil && len(sub) > 0 {
         return sub
     }
     return scanPlainURIs(pt)
+}
+
+func trimNonPrintable(b []byte) []byte {
+    start := 0
+    for start < len(b) && b[start] < 0x20 && b[start] != '\n' && b[start] != '\r' && b[start] != '\t' {
+        start++
+    }
+    end := len(b)
+    for end > start && b[end-1] < 0x20 && b[end-1] != '\n' && b[end-1] != '\r' && b[end-1] != '\t' {
+        end--
+    }
+    return b[start:end]
+}
+
+func splitJSONObjects(data []byte) [][]byte {
+    var objects [][]byte
+    depth := 0
+    start := -1
+    inString := false
+    escaped := false
+    for i, b := range data {
+        if escaped {
+            escaped = false
+            continue
+        }
+        if b == '\\' {
+            escaped = true
+            continue
+        }
+        if b == '"' {
+            inString = !inString
+            continue
+        }
+        if inString {
+            continue
+        }
+        switch b {
+        case '{':
+            if depth == 0 {
+                start = i
+            }
+            depth++
+        case '}':
+            depth--
+            if depth == 0 && start >= 0 {
+                objects = append(objects, data[start:i+1])
+                start = -1
+            }
+        }
+    }
+    return objects
 }
 
 var uriSchemes = []string{"vless://", "vmess://", "trojan://", "ss://", "ssr://", "hysteria2://", "hy2://", "tuic://"}
@@ -596,6 +677,19 @@ func walkJSON(v any, uris *[]string) {
                 *uris = append(*uris, u...)
             }
         }
+        if raw, ok := x["v2rayProfile"]; ok {
+            switch c := raw.(type) {
+            case map[string]any:
+                b, _ := json.Marshal(c)
+                if u, err := extractFromV2rayProfile(b); err == nil {
+                    *uris = append(*uris, u...)
+                }
+            case string:
+                if u, err := extractFromV2rayProfile([]byte(c)); err == nil {
+                    *uris = append(*uris, u...)
+                }
+            }
+        }
         for _, v := range x {
             walkJSON(v, uris)
         }
@@ -623,6 +717,7 @@ type realitySettingsT struct {
 
 type wsSettingsT struct {
     Path    string            `json:"path"`
+    Host    string            `json:"host"`
     Headers map[string]string `json:"headers"`
 }
 
@@ -693,7 +788,15 @@ type serversSettingsT struct {
     Servers []serverEntryT `json:"servers"`
 }
 
-// ────────────── آدرس‌های IPv6 رو داخل براکت [ ] می‌ذاره ──────────────
+type napsternetProfile struct {
+    ConfigType int    `json:"configType"`
+    Remarks    string `json:"remarks"`
+    Server     string `json:"server"`
+    ServerPort string `json:"serverPort"`
+    Password   string `json:"password"`
+    Method     string `json:"method"`
+    V2rayJson  string `json:"v2rayJson"`
+}
 
 func formatHost(addr string) string {
     if strings.Contains(addr, ":") && !strings.HasPrefix(addr, "[") {
@@ -726,7 +829,9 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             if ss.WSSettings.Path != "" {
                 q.Set("path", ss.WSSettings.Path)
             }
-            if h, ok := ss.WSSettings.Headers["Host"]; ok && h != "" {
+            if ss.WSSettings.Host != "" {
+                q.Set("host", ss.WSSettings.Host)
+            } else if h, ok := ss.WSSettings.Headers["Host"]; ok && h != "" {
                 q.Set("host", h)
             } else if h, ok := ss.WSSettings.Headers["host"]; ok && h != "" {
                 q.Set("host", h)
@@ -856,7 +961,9 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
     case "ws":
         if ss.WSSettings != nil {
             path = ss.WSSettings.Path
-            if h, ok := ss.WSSettings.Headers["Host"]; ok {
+            if ss.WSSettings.Host != "" {
+                host = ss.WSSettings.Host
+            } else if h, ok := ss.WSSettings.Headers["Host"]; ok {
                 host = h
             } else if h, ok := ss.WSSettings.Headers["host"]; ok {
                 host = h
@@ -1009,5 +1116,31 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
         }
         uris = append(uris, uri)
     }
+    return uris, nil
+}
+
+func extractFromV2rayProfile(b []byte) ([]string, error) {
+    var p napsternetProfile
+    if err := json.Unmarshal(b, &p); err != nil {
+        return nil, err
+    }
+
+    // اگه v2rayJson پر باشه، از توش استخراج کن
+    if p.V2rayJson != "" {
+        if u, err := extractURIsFromConfig([]byte(p.V2rayJson)); err == nil && len(u) > 0 {
+            return u, nil
+        }
+    }
+
+    var uris []string
+    remarks := p.Remarks
+
+    // configType 3 = Shadowsocks
+    if p.ConfigType == 3 && p.Method != "" && p.Server != "" {
+        userInfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.Password))
+        uri := fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(p.Server), p.ServerPort, url.PathEscape(remarks))
+        uris = append(uris, uri)
+    }
+
     return uris, nil
 }
