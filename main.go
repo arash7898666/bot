@@ -693,6 +693,15 @@ type serversSettingsT struct {
     Servers []serverEntryT `json:"servers"`
 }
 
+// ────────────── آدرس‌های IPv6 رو داخل براکت [ ] می‌ذاره ──────────────
+
+func formatHost(addr string) string {
+    if strings.Contains(addr, ":") && !strings.HasPrefix(addr, "[") {
+        return "[" + addr + "]"
+    }
+    return addr
+}
+
 func escapeUserInfo(s string) string {
     return strings.ReplaceAll(url.QueryEscape(s), "+", "%20")
 }
@@ -822,7 +831,7 @@ func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
     }
 
     return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-        u.Id, v.Address, v.Port, q.Encode(), url.PathEscape(remarks)), nil
+        u.Id, formatHost(v.Address), v.Port, q.Encode(), url.PathEscape(remarks)), nil
 }
 
 func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, error) {
@@ -912,7 +921,7 @@ func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) (string
         q.Set("flow", s.Flow)
     }
     return fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
-        escapeUserInfo(s.Password), s.Address, s.Port, q.Encode(), url.PathEscape(remarks)), nil
+        escapeUserInfo(s.Password), formatHost(s.Address), s.Port, q.Encode(), url.PathEscape(remarks)), nil
 }
 
 func shadowsocksURI(ts serversSettingsT, remarks string) (string, error) {
@@ -921,7 +930,7 @@ func shadowsocksURI(ts serversSettingsT, remarks string) (string, error) {
     }
     s := ts.Servers[0]
     userInfo := base64.RawURLEncoding.EncodeToString([]byte(s.Method + ":" + s.Password))
-    return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, s.Address, s.Port, url.PathEscape(remarks)), nil
+    return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, formatHost(s.Address), s.Port, url.PathEscape(remarks)), nil
 }
 
 func outboundToURI(protocol string, settingsRaw, streamRaw json.RawMessage, remarks string) (string, error) {
