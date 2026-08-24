@@ -15,12 +15,13 @@ import (
     "path/filepath"
     "runtime/debug"
     "strings"
+    "sync"
     "time"
 
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "3.0-UNIVERSAL"
+const botVersion = "5.0-ALL-FORMATS"
 
 const (
     msgLimit  = 3900
@@ -32,6 +33,90 @@ var (
     adminIDs   = map[int64]bool{}
     httpClient = &http.Client{Timeout: 90 * time.Second}
 )
+
+// ═══════════════════ تنظیمات و آمار ═══════════════════
+
+type BotSettings struct {
+    ForceChannel string `json:"force_channel"`
+}
+
+type BotStats struct {
+    Users     map[int64]string `json:"users"`
+    Processed int              `json:"processed"`
+}
+
+var (
+    settings   = BotSettings{}
+    stats      = BotStats{Users: map[int64]string{}}
+    settingsMu sync.Mutex
+    statsMu    sync.Mutex
+)
+
+const settingsFile = "bot_settings.json"
+const statsFile = "bot_stats.json"
+
+func loadState() {
+    if b, err := os.ReadFile(settingsFile); err == nil {
+        _ = json.Unmarshal(b, &settings)
+    } else if ch := os.Getenv("FORCE_CHANNEL"); ch != "" {
+        if !strings.HasPrefix(ch, "@") {
+            ch = "@" + ch
+        }
+        settings.ForceChannel = ch
+    }
+    if b, err := os.ReadFile(statsFile); err == nil {
+        _ = json.Unmarshal(b, &stats)
+        if stats.Users == nil {
+            stats.Users = map[int64]string{}
+        }
+    }
+}
+
+func saveSettings() {
+    settingsMu.Lock()
+    defer settingsMu.Unlock()
+    b, _ := json.Marshal(settings)
+    _ = os.WriteFile(settingsFile, b, 0644)
+}
+
+func saveStatsLocked() {
+    b, _ := json.Marshal(stats)
+    _ = os.WriteFile(statsFile, b, 0644)
+}
+
+func trackUser(from *tgbotapi.User) {
+    if from == nil {
+        return
+    }
+    statsMu.Lock()
+    defer statsMu.Unlock()
+    name := from.FirstName
+    if from.UserName != "" {
+        name = "@" + from.UserName
+    }
+    if old, ok := stats.Users[from.ID]; !ok || old != name {
+        stats.Users[from.ID] = name
+        saveStatsLocked()
+    }
+}
+
+func incrementProcessed() {
+    statsMu.Lock()
+    stats.Processed++
+    saveStatsLocked()
+    statsMu.Unlock()
+}
+
+func channelStatus() string {
+    settingsMu.Lock()
+    defer settingsMu.Unlock()
+    if settings.ForceChannel == "" {
+        return "غیرفعال"
+    }
+    return settings.ForceChannel
+}
+
+// ═══════════════════ اصلی ═══════════════════
 
 func main() {
     token := os.Getenv("BOT_TOKEN")
@@ -46,13 +131,16 @@ func main() {
         }
     }
 
+    loadState()
+
     var err error
     bot, err = tgbotapi.NewBotAPI(token)
     if err != nil {
         log.Fatalf("❌ اتصال به Bot API ناموفق: %v", err)
     }
     bot.Debug = os.Getenv("DEBUG") == "1"
-    log.Printf("✅ ربات @%s روشن شد — نسخه %s", bot.Self.UserName, botVersion)
+    log.Printf("✅ ربات @%s روشن شد — نسخه %s — کانال اجباری: %s",
+        bot.Self.UserName, botVersion, channelStatus())
 
     u := tgbotapi.NewUpdate(0)
     u.Timeout = 60
@@ -77,18 +165,52 @@ func safeHandle(msg *tgbotapi.Message) {
 
 func handleMessage(msg *tgbotapi.Message) {
     chatID := msg.Chat.ID
+    userID := int64(0)
+    if msg.From != nil {
+        userID = msg.From.ID
+    }
+    admin := adminIDs[userID]
 
-    if len(adminIDs) > 0 && (msg.From == nil || !adminIDs[msg.From.ID]) {
-        reply(chatID, "⛔ شما اجازهٔ استفاده از این ربات را ندارید.")
-        return
+    trackUser(msg.From)
+
+    // ─── جوین اجباری (ادمین رد می‌شود) ───
+    settingsMu.Lock()
+    forceCh := settings.ForceChannel
+    settingsMu.Unlock()
+    if forceCh != "" && !admin {
+        if !isMemberOf(userID, forceCh) {
+            sendJoinPrompt(chatID, forceCh)
+            return
+        }
     }
 
+    // ─── دستورات ───
     if msg.IsCommand() {
         switch msg.Command() {
         case "start", "help":
             sendHTML(chatID, helpText())
         case "version":
             reply(chatID, "🤖 نسخه ربات: "+botVersion)
+        case "channel":
+            reply(chatID, "📢 وضعیت جوین اجباری: "+channelStatus())
+        case "setchannel":
+            if !admin {
+                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                return
+            }
+            handleSetChannel(msg, chatID)
+        case "stats":
+            if !admin {
+                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                return
+            }
+            reply(chatID, statsText())
+        case "broadcast":
+            if !admin {
+                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                return
+            }
+            handleBroadcast(msg, chatID)
         default:
             reply(chatID, "❓ دستور ناشناخته. /help را بزنید.")
         }
@@ -97,6 +219,7 @@ func handleMessage(msg *tgbotapi.Message) {
 
     var data []byte
     var name string
+    var fileExt string
 
     switch {
     case msg.Document != nil:
@@ -111,12 +234,25 @@ func handleMessage(msg *tgbotapi.Message) {
             return
         }
         data = d
+        fileExt = strings.ToLower(filepath.Ext(msg.Document.FileName))
         name = strings.TrimSuffix(msg.Document.FileName, filepath.Ext(msg.Document.FileName))
         if name == "" {
-            name = "npvt"
+            name = "config"
         }
 
     case strings.TrimSpace(msg.Text) != "":
+        txt := strings.TrimSpace(msg.Text)
+        // ─── اگر منتظر رمز SlipNet هستیم، این پیام = رمز ───
+        if bd, ok := takePendingBundle(chatID); ok {
+            sendAction(chatID, tgbotapi.ChatTyping)
+            bres, berr := trySlipnetBundleDecrypt(bd, txt)
+            if berr != nil {
+                reply(chatID, "❌ "+berr.Error()+"\n\n🔑 رمز اشتباه بود. فایل را دوباره بفرستید و رمز صحیح را ارسال کنید.")
+            } else {
+                sendBundleResult(chatID, bres)
+            }
+            return
+        }
         data = []byte(msg.Text)
         name = "npvt"
 
@@ -125,21 +261,26 @@ func handleMessage(msg *tgbotapi.Message) {
         name = "npvt"
 
     default:
-        reply(chatID, "📎 فایل .npvt را بفرستید یا محتوایش را متن کنید. راهنما: /help")
+        reply(chatID, "📎 فایل را بفرستید یا محتوایش را متن کنید. راهنما: /help")
         return
     }
 
+    incrementProcessed()
     sendAction(chatID, tgbotapi.ChatTyping)
 
-    res, err := processInput(data)
+    res, err, needPassword := processRouted(data, fileExt, chatID)
+    if needPassword {
+        reply(chatID, "🔐 این فایل SlipNet یک باندل رمزدار است!\n\n🔑 لطفاً رمز (Password) فایل را همین حالا به‌صورت یک پیام بفرستید:")
+        return
+    }
     if err != nil {
         reply(chatID, "❌ "+err.Error()+"\n\n🤖 "+botVersion)
         return
     }
 
-    if len(res.URIs) == 0 && len(res.Raw) == 0 {
-        if len(res.Errors) > 0 {
-            reply(chatID, "⚠️ هیچ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n")+"\n\n🤖 "+botVersion)
+    if res == nil || (len(res.URIs) == 0 && len(res.Raw) == 0) {
+        if res != nil && len(res.Errors) > 0 {
+            reply(chatID, "⚠️ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n")+"\n\n🤖 "+botVersion)
         } else {
             reply(chatID, "⚠️ در این ورودی کانفیگی پیدا نشد.\n\n🤖 "+botVersion)
         }
@@ -158,7 +299,7 @@ func handleMessage(msg *tgbotapi.Message) {
         summary += fmt.Sprintf(" • %d بلوک خام", len(res.Raw))
     }
     if len(res.Errors) > 0 {
-        summary += fmt.Sprintf("\n⚠️ %d بلوک نادیده (متادیتا/ناموفق)", len(res.Errors))
+        summary += fmt.Sprintf("\n⚠️ %d بلوک نادیده", len(res.Errors))
     }
     summary += "\n🤖 نسخه " + botVersion
 
@@ -176,6 +317,110 @@ func handleMessage(msg *tgbotapi.Message) {
         }
     }
 }
+
+// ═══════════════════ جوین اجباری ═══════════════════
+
+func isMemberOf(userID int64, channel string) bool {
+    if channel == "" {
+        return true
+    }
+    member, err := bot.GetChatMember(tgbotapi.GetChatMemberConfig{
+        ChatConfigWithUser: tgbotapi.ChatConfigWithUser{
+            SuperGroupUsername: channel,
+            UserID:             userID,
+        },
+    })
+    if err != nil {
+        log.Printf("⚠️ بررسی عضویت ناموفق (%s): %v — احتمالاً ربات ادمین کانال نیست", channel, err)
+        return false
+    }
+    switch member.Status {
+    case "creator", "administrator", "member":
+        return true
+    }
+    return false
+}
+
+func sendJoinPrompt(chatID int64, channel string) {
+    link := "https://t.me/" + strings.TrimPrefix(channel, "@")
+    keyboard := tgbotapi.NewInlineKeyboardMarkup(
+        tgbotapi.NewInlineKeyboardRow(
+            tgbotapi.NewInlineKeyboardButtonURL("📢 عضویت در کانال", link),
+        ),
+    )
+    m := tgbotapi.NewMessage(chatID, fmt.Sprintf(
+        "🔒 برای استفاده از ربات ابتدا در کانال عضو شوید:\n\n%s\n\n"+
+            "بعد از عضویت، دوباره پیام یا فایل خود را بفرستید. 👇", channel))
+    m.ReplyMarkup = keyboard
+    m.DisableWebPagePreview = true
+    if _, err := bot.Send(m); err != nil {
+        log.Printf("خطا در ارسال پیام عضویت: %v", err)
+    }
+}
+
+func handleSetChannel(msg *tgbotapi.Message, chatID int64) {
+    parts := strings.Fields(msg.Text)
+    if len(parts) < 2 || strings.EqualFold(parts[1], "off") {
+        settingsMu.Lock()
+        settings.ForceChannel = ""
+        settingsMu.Unlock()
+        saveSettings()
+        reply(chatID, "✅ جوین اجباری غیرفعال شد.")
+        return
+    }
+    ch := parts[1]
+    if !strings.HasPrefix(ch, "@") {
+        ch = "@" + ch
+    }
+    settingsMu.Lock()
+    settings.ForceChannel = ch
+    settingsMu.Unlock()
+    saveSettings()
+    reply(chatID, "✅ جوین اجباری فعال شد روی "+ch+
+        "\n\n⚠️ مهم: حتماً ربات را در این کانال «ادمین» کنید،"+
+        " وگرنه نمی‌تواند عضویت کاربران را بررسی کند.")
+}
+
+func statsText() string {
+    statsMu.Lock()
+    users := len(stats.Users)
+    processed := stats.Processed
+    statsMu.Unlock()
+    return fmt.Sprintf("📊 آمار ربات:\n\n👥 کاربران: %d\n"+
+        "📦 پردازش‌ها: %d\n"+
+        "📢 کانال اجباری: %s\n"+
+        "🤖 نسخه: %s", users, processed, channelStatus(), botVersion)
+}
+
+func handleBroadcast(msg *tgbotapi.Message, chatID int64) {
+    parts := strings.Fields(msg.Text)
+    if len(parts) < 2 {
+        reply(chatID, "用法: /broadcast متن پیام")
+        return
+    }
+    text := strings.Join(parts[1:], " ")
+
+    statsMu.Lock()
+    ids := make([]int64, 0, len(stats.Users))
+    for id := range stats.Users {
+        ids = append(ids, id)
+    }
+    statsMu.Unlock()
+
+    reply(chatID, fmt.Sprintf("⏳ در حال ارسال به %d کاربر...", len(ids)))
+    sent := 0
+    for _, id := range ids {
+        m := tgbotapi.NewMessage(id, "📢 "+text)
+        m.DisableWebPagePreview = true
+        if _, err := bot.Send(m); err == nil {
+            sent++
+        }
+        time.Sleep(50 * time.Millisecond)
+    }
+    reply(chatID, fmt.Sprintf("✅ پیام به %d کاربر از %d ارسال شد.", sent, len(ids)))
+}
+
+// ═══════════════════ ابزارهای تلگرام ═══════════════════
 
 func reply(chatID int64, text string) {
     if r := []rune(text); len(r) > 4090 {
@@ -250,19 +495,22 @@ func replyLines(chatID int64, lines []string) {
 }
 
 func helpText() string {
-    return `🔐 <b>ربات رمزگشای NPVT</b> — نسخه <code>` + botVersion + `</code>
+    return `🔐 <b>ربات رمزگشای کانفیگ</b> — نسخه <code>` + botVersion + `</code>
 
-فایل‌های <code>.npvt</code> را رمزگشایی و کانفیگ‌ها را استخراج می‌کنم.
+📤 <b>فرمت‌های پشتیبانی‌شده:</b>
+• <code>.npvt</code> — NapsternetV
+• <code>.ehi</code> — HTTP Injector
+• <code>.hat</code> — HA Tunnel Plus
+• <code>.happ</code> — Happ (+ لینک happ://)
+• <code>.slip</code> — SlipNet (+ باندل رمزدار)
+• <code>.nm</code> — NetMod
+• <code>.dark</code> — DarkTunnel
+• JSON مستقیم / base64 / ZIP
 
-📤 <b>ورودی‌های پشتیبانی‌شده:</b>
-• فایل <code>.npvt</code> (رمزگشایی White-Box)
-• فایل <code>.ehi</code> یا هر ZIP حاوی JSON
-• JSON مستقیم (v2box / sing-box / v2ray)
-• متن base64 یا لینک‌های خام
+✨ <b>خروجی:</b> <code>vless:// vmess:// trojan:// ss:// hy2:// tuic://</code>
 
-✨ <b>خروجی:</b> <code>vless://</code> <code>vmess://</code> <code>trojan://</code> <code>ss://</code> <code>hy2://</code> <code>tuic://</code>
-
-/version → نمایش نسخه ربات`
+/version → نسخه ربات
+/channel → وضعیت کانال`
 }
 
 // ═══════════════════ موتور پردازش یونیورسال ═══════════════════
@@ -281,7 +529,6 @@ func processInput(data []byte) (*processResult, error) {
 }
 
 func processUniversal(data []byte, depth int) (*processResult, error) {
-    // ۱) فایل ZIP (مثل .ehi)
     if len(data) > 4 && data[0] == 'P' && data[1] == 'K' && depth < 3 {
         return processZIP(data, depth)
     }
@@ -291,20 +538,17 @@ func processUniversal(data []byte, depth int) (*processResult, error) {
         return nil, fmt.Errorf("محتوای ورودی خالی است")
     }
 
-    // ۲) JSON مستقیم
     if text[0] == '{' || text[0] == '[' {
         res := &processResult{}
         consumeJSONBlob([]byte(text), res)
         return res, nil
     }
 
-    // ۳) مسیر NPVT (توکن‌های NPVT یا کاما-جدا)
     npvtRes := tryNPVT(text)
     if npvtRes != nil && (len(npvtRes.URIs) > 0 || len(npvtRes.Raw) > 0) {
         return npvtRes, nil
     }
 
-    // ۴) base64 → محتوا
     if b, ok := decodeB64Loose(text); ok {
         inner := strings.TrimSpace(string(b))
         if inner != "" && (inner[0] == '{' || inner[0] == '[') {
@@ -319,7 +563,6 @@ func processUniversal(data []byte, depth int) (*processResult, error) {
         }
     }
 
-    // ۵) اسکن URI خام
     if uris := scanPlainURIs([]byte(text)); len(uris) > 0 {
         return &processResult{URIs: uris}, nil
     }
@@ -440,7 +683,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    // کل سند یک JSON؟
     var root any
     if err := json.Unmarshal(pt, &root); err == nil {
         if isNoiseJSON(root) {
@@ -453,14 +695,12 @@ func consumeJSONBlob(pt []byte, res *processResult) {
             res.URIs = append(res.URIs, uris...)
             return
         }
-        // JSON معتبر ولی بدون کانفیگ → خام
         if s := strings.TrimSpace(string(pt)); s != "" {
             res.Raw = append(res.Raw, s)
         }
         return
     }
 
-    // چند سند JSON پشت‌سرهم
     objs := splitJSONObjects(pt)
     if len(objs) > 1 {
         foundAny := false
@@ -484,7 +724,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         }
     }
 
-    // متن حاوی URI؟
     if uris := scanPlainURIs(pt); len(uris) > 0 {
         res.URIs = append(res.URIs, uris...)
         return
@@ -495,7 +734,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
     }
 }
 
-// بلوک‌هایی که فقط قفل/تبلیغ هستند و کانفیگ ندارند
 func isNoiseJSON(root any) bool {
     m, ok := root.(map[string]any)
     if !ok {
