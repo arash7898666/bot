@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "5.0-ALL-FORMATS"
+const botVersion = "6.0-EHI-V2RAY"
 
 const (
     msgLimit  = 3900
@@ -242,6 +242,18 @@ func handleMessage(msg *tgbotapi.Message) {
 
     case strings.TrimSpace(msg.Text) != "":
         txt := strings.TrimSpace(msg.Text)
+        // لینک‌های مخفی (TextLink) داخل پیام‌های فورواردشده هم جمع شوند
+        if len(msg.Entities) > 0 {
+            var extra []string
+            for _, e := range msg.Entities {
+                if e.Type == "text_link" && e.URL != "" {
+                    extra = append(extra, e.URL)
+                }
+            }
+            if len(extra) > 0 {
+                txt += "\n" + strings.Join(extra, "\n")
+            }
+        }
         // ─── اگر منتظر رمز SlipNet هستیم، این پیام = رمز ───
         if bd, ok := takePendingBundle(chatID); ok {
             sendAction(chatID, tgbotapi.ChatTyping)
@@ -253,7 +265,7 @@ func handleMessage(msg *tgbotapi.Message) {
             }
             return
         }
-        data = []byte(msg.Text)
+        data = []byte(txt)
         name = "npvt"
 
     case strings.TrimSpace(msg.Caption) != "":
@@ -297,6 +309,9 @@ func handleMessage(msg *tgbotapi.Message) {
     summary := fmt.Sprintf("✅ %d کانفیگ استخراج شد", len(res.URIs))
     if len(res.Raw) > 0 {
         summary += fmt.Sprintf(" • %d بلوک خام", len(res.Raw))
+    }
+    if len(res.URIs) == 0 && len(res.Raw) > 0 {
+        summary += "\nℹ️ این کانفیگ از نوع SSH/Tunnel است و لینک V2ray ندارد — داده کامل در RAW."
     }
     if len(res.Errors) > 0 {
         summary += fmt.Sprintf("\n⚠️ %d بلوک نادیده", len(res.Errors))
@@ -395,7 +410,7 @@ func statsText() string {
 func handleBroadcast(msg *tgbotapi.Message, chatID int64) {
     parts := strings.Fields(msg.Text)
     if len(parts) < 2 {
-        reply(chatID, "用法: /broadcast متن پیام")
+        reply(chatID, "استفاده: /broadcast متن پیام")
         return
     }
     text := strings.Join(parts[1:], " ")
@@ -508,6 +523,8 @@ func helpText() string {
 • JSON مستقیم / base64 / ZIP
 
 ✨ <b>خروجی:</b> <code>vless:// vmess:// trojan:// ss:// hy2:// tuic://</code>
+
+ℹ️ کانفیگ‌های SSH/Tunnel (بدون V2ray) به‌صورت JSON کامل در RAW برگردانده می‌شوند — این کانفیگ‌ها فقط در اپ خودشان کار می‌کنند و لینک V2ray ندارند.
 
 /version → نسخه ربات
 /channel → وضعیت کانال`
@@ -1044,7 +1061,24 @@ func ctrIncrement(counter *[16]byte) {
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
+        // فیلد V2ray در NapsternetV و کانفیگ‌های عمومی
         if raw, ok := x["v2rayJson"]; ok {
+            switch c := raw.(type) {
+            case string:
+                if c != "" {
+                    if u, err := extractURIsFromConfig([]byte(c)); err == nil {
+                        *uris = append(*uris, u...)
+                    }
+                }
+            case map[string]any:
+                b, _ := json.Marshal(c)
+                if u, err := extractURIsFromConfig(b); err == nil {
+                    *uris = append(*uris, u...)
+                }
+            }
+        }
+        // فیلد V2ray در HTTP Injector (.ehi)
+        if raw, ok := x["v2rRawJson"]; ok {
             switch c := raw.(type) {
             case string:
                 if c != "" {
