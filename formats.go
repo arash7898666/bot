@@ -15,6 +15,7 @@ import (
     "errors"
     "fmt"
     "io"
+    "net/url"
     "regexp"
     "strings"
     "sync"
@@ -38,7 +39,6 @@ var (
     nmLinkRe      = regexp.MustCompile(`nm-[a-z]+://[A-Za-z0-9+/=\-_]+`)
 )
 
-// کاراکترهای نامرئی که تلگرام موقع فوروارد اضافه می‌کند
 var invisibleRe = regexp.MustCompile(`[\x{200B}\x{200C}\x{200D}\x{200E}\x{200F}\x{202A}\x{202B}\x{202C}\x{202D}\x{202E}\x{2066}\x{2067}\x{2068}\x{2069}\x{FEFF}]`)
 
 func cleanInvisible(s string) string {
@@ -68,7 +68,6 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
 
     text := cleanInvisible(string(data))
 
-    // جستجوی لینک در «هر جای» متن — نه فقط ابتدای پیام
     if m := slipnetLinkRe.FindString(text); m != "" {
         return processSlipnet([]byte(m), chatID)
     }
@@ -112,6 +111,9 @@ func trySlipnetBundleDecrypt(bundleData []byte, password string) (*processResult
     }
     res := &processResult{}
     res.Raw = append(res.Raw, parseSlipProfile(plaintext))
+    if uri := slipExtractVless(plaintext); uri != "" {
+        res.URIs = append(res.URIs, uri)
+    }
     if uris := scanPlainURIs([]byte(plaintext)); len(uris) > 0 {
         res.URIs = append(res.URIs, uris...)
     }
@@ -124,7 +126,12 @@ func sendBundleResult(chatID int64, res *processResult) {
         return
     }
     var lines []string
-    lines = append(lines, res.URIs...)
+    for i, u := range res.URIs {
+        if i > 0 {
+            lines = append(lines, "")
+        }
+        lines = append(lines, u)
+    }
     for _, r := range res.Raw {
         lines = append(lines, "", "─────── RAW ───────", r)
     }
@@ -279,6 +286,93 @@ func parseSlipProfile(decryptedText string) string {
     return sb.String()
 }
 
+// ─────────────── ساخت vless:// از فیلدهای پروفایل SlipNet ───────────────
+
+func slipField(parts []string, name string) string {
+    if len(parts) == 0 {
+        return ""
+    }
+    schema, ok := slipSchemas[parts[0]]
+    if !ok {
+        return ""
+    }
+    for i, label := range schema {
+        if label == name && i < len(parts) {
+            return strings.TrimSpace(parts[i])
+        }
+    }
+    return ""
+}
+
+func slipExtractVless(plaintext string) string {
+    plaintext = strings.TrimSuffix(plaintext, "|")
+    parts := strings.Split(plaintext, "|")
+    if len(parts) < 2 {
+        return ""
+    }
+
+    // فقط وقتی نوع تونل vless است
+    if !strings.EqualFold(slipField(parts, "Tunnel Type/Mode"), "vless") {
+        return ""
+    }
+    uuid := slipField(parts, "VLESS UUID")
+    if uuid == "" {
+        return ""
+    }
+
+    // آدرس اتصال: CDN IP در اولویت است، وگرنه Domain
+    addr := slipField(parts, "CDN IP")
+    port := slipField(parts, "CDN Port")
+    if addr == "" {
+        addr = slipField(parts, "Domain")
+    }
+    if port == "" {
+        port = slipField(parts, "Port")
+    }
+    if addr == "" || port == "" {
+        return ""
+    }
+
+    q := url.Values{}
+
+    transport := slipField(parts, "VLESS Transport")
+    if transport == "" {
+        transport = "tcp"
+    }
+    q.Set("type", transport)
+
+    security := slipField(parts, "VLESS Security")
+    if security == "" {
+        security = "none"
+    }
+    q.Set("security", security)
+
+    domain := slipField(parts, "Domain")
+
+    if transport == "ws" {
+        if p := slipField(parts, "VLESS WS Path"); p != "" {
+            q.Set("path", p)
+        }
+        if domain != "" {
+            q.Set("host", domain)
+        }
+    }
+
+    if security == "tls" || security == "reality" {
+        sni := slipField(parts, "VLESS SNI")
+        if sni == "" {
+            sni = domain
+        }
+        if sni != "" {
+            q.Set("sni", sni)
+        }
+    }
+
+    remarks := slipField(parts, "Name")
+    return fmt.Sprintf("vless://%s@%s:%s?%s#%s",
+        uuid, formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
+}
+
 func slipDecryptBlob(keyHex, blobStr string) (string, error) {
     data, ok := decodeB64Loose(strings.Join(strings.Fields(blobStr), ""))
     if !ok {
@@ -347,9 +441,13 @@ func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
     // ۱) رمزگشایی با کلید ثابت
     if plaintext, err := slipDecryptBlob(slipKeyHex, text); err == nil {
         res.Raw = append(res.Raw, parseSlipProfile(plaintext))
+        if uri := slipExtractVless(plaintext); uri != "" {
+            res.URIs = append(res.URIs, uri)
+        }
         if uris := scanPlainURIs([]byte(plaintext)); len(uris) > 0 {
             res.URIs = append(res.URIs, uris...)
         }
+        res.URIs = dedupe(res.URIs)
         return res, nil, false
     }
 
@@ -357,7 +455,7 @@ func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
     if b, ok := decodeB64Loose(text); ok && len(b) >= 1+slipSaltLen+slipIVLen+16 {
         if b[0] == slipFormatVersion {
             setPendingBundle(chatID, b)
-            return nil, nil, true // نیاز به رمز
+            return nil, nil, true
         }
     }
 
@@ -368,6 +466,9 @@ func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
         if len(parts) > 1 {
             if _, known := slipSchemas[parts[0]]; known {
                 res.Raw = append(res.Raw, parseSlipProfile(s))
+                if uri := slipExtractVless(s); uri != "" {
+                    res.URIs = append(res.URIs, uri)
+                }
                 return res, nil, false
             }
         }
