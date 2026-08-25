@@ -545,7 +545,7 @@ func buildCopyKeyboard(uris []string) *tgbotapi.InlineKeyboardMarkup {
     var rows [][]tgbotapi.InlineKeyboardButton
     for _, u := range uris {
         rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonSwitchInlineQueryCurrentChat("📋 کپی کانفیگ", u),
+            tgbotapi.NewInlineKeyboardButtonSwitch("📋 کپی کانفیگ", u),("📋 کپی کانفیگ", u),
         ))
     }
     kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
