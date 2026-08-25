@@ -51,7 +51,7 @@ var (
     stats      = BotStats{Users: map[int64]string{}}
     settingsMu sync.Mutex
     statsMu    sync.Mutex
-    statsDirty bool // زیر statsMu — دیسک فقط وقتی لازم است نوشته می‌شود
+    statsDirty bool
 )
 
 const settingsFile = "bot_settings.json"
@@ -81,14 +81,12 @@ func saveSettings() {
     _ = os.WriteFile(settingsFile, b, 0644)
 }
 
-// persistStats فقط وقتی statsMu قبلاً گرفته شده صدا زده شود.
 func persistStats() {
     b, _ := json.Marshal(stats)
     _ = os.WriteFile(statsFile, b, 0644)
     statsDirty = false
 }
 
-// نوشتن دیسک حداکثر هر ۳۰ ثانیه — سبک برای دیسک ephemeral رندر
 func startStatsFlusher() {
     go func() {
         for range time.Tick(30 * time.Second) {
@@ -150,7 +148,6 @@ func isMemberOf(userID int64, channel string) bool {
     if channel == "" {
         return true
     }
-    // نتیجه مثبت کش‌شده؟
     memberCache.Lock()
     e, hit := memberCache.m[userID]
     memberCache.Unlock()
@@ -166,11 +163,10 @@ func isMemberOf(userID int64, channel string) bool {
     })
     if err != nil {
         log.Printf("⚠️ بررسی عضویت ناموفق (%s): %v — احتمالاً ربات ادمین کانال نیست", channel, err)
-        return false // خطا کش نمی‌شود
+        return false
     }
     switch member.Status {
     case "creator", "administrator", "member":
-        // فقط مثبت کش می‌شود تا بعد از جوین، بلافاصله رد شود
         memberCache.Lock()
         memberCache.m[userID] = memberCacheEntry{until: time.Now().Add(memberCacheTTL)}
         memberCache.Unlock()
@@ -179,9 +175,9 @@ func isMemberOf(userID int64, channel string) bool {
     return false
 }
 
-// ═══════════════════ قفل هر-کاربر (حداکثر ۱ پردازش همزمان) ═══════════════════
+// ═══════════════════ قفل هر-کاربر ═══════════════════
 
-var userLocks sync.Map // chatID -> chan struct{}
+var userLocks sync.Map
 
 func tryAcquireUser(chatID int64) bool {
     actual, _ := userLocks.LoadOrStore(chatID, make(chan struct{}, 1))
@@ -259,7 +255,7 @@ func main() {
         log.Fatalf("❌ اتصال به Bot API ناموفق: %v", err)
     }
     bot.Debug = os.Getenv("DEBUG") == "1"
-    go setBotCommands() // غیرمسدودکننده
+    go setBotCommands()
     log.Printf("✅ ربات @%s روشن شد — نسخه %s — کانال اجباری: %s",
         bot.Self.UserName, botVersion, channelStatus())
 
@@ -285,9 +281,9 @@ func safeHandle(msg *tgbotapi.Message) {
 }
 
 type procOut struct {
-    res       *processResult
-    err       error
-    needPwd   bool
+    res     *processResult
+    err     error
+    needPwd bool
 }
 
 func handleMessage(msg *tgbotapi.Message) {
@@ -346,7 +342,7 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
-    // ─── بررسی باندل رمزدار در انتظار (قبل از قفل کاربر) ───
+    // ─── بررسی باندل رمزدار در انتظار ───
     if strings.TrimSpace(msg.Text) != "" {
         if bd, found, expired := takePendingBundle(chatID); found || expired {
             if expired {
@@ -364,7 +360,7 @@ func handleMessage(msg *tgbotapi.Message) {
         }
     }
 
-    // ─── قفل هر-کاربر: حداکثر ۱ پردازش همزمان ───
+    // ─── قفل هر-کاربر ───
     if !tryAcquireUser(chatID) {
         reply(chatID, "⏳ درخواست قبلی شما هنوز در حال پردازش است. لطفاً منتظر بمانید.")
         return
@@ -374,7 +370,7 @@ func handleMessage(msg *tgbotapi.Message) {
     var data []byte
     var name string
     var fileExt string
-    var progMsgID int // پیام «در حال پردازش» که بعداً حذف می‌شود
+    var progMsgID int
 
     switch {
     case msg.Document != nil:
@@ -382,7 +378,6 @@ func handleMessage(msg *tgbotapi.Message) {
             reply(chatID, "❌ فایل بزرگ‌تر از ۱۹ مگابایت است؛ ربات‌های تلگرام اجازهٔ دانلود ندارند.")
             return
         }
-        // پیام پیشرفت برای فایل‌ها (دانلود + رمزگشایی ممکن است طول بکشد)
         pm := tgbotapi.NewMessage(chatID, "⏳ در حال دانلود و رمزگشایی...")
         if sent, err := bot.Send(pm); err == nil {
             progMsgID = sent.MessageID
@@ -430,7 +425,7 @@ func handleMessage(msg *tgbotapi.Message) {
     incrementProcessed()
     sendAction(chatID, tgbotapi.ChatTyping)
 
-    // ─── پردازش با سقف زمان (حتی اگر گیر کند، کاربر بی‌جواب نمی‌ماند) ───
+    // ─── پردازش با سقف زمان ───
     done := make(chan procOut, 1)
     go func() {
         defer func() {
@@ -473,7 +468,6 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
-    // ─── کانفیگ‌ها با خط فاصله از هم جدا می‌شوند ───
     var lines []string
     for i, u := range res.URIs {
         if i > 0 {
@@ -498,7 +492,6 @@ func handleMessage(msg *tgbotapi.Message) {
     }
     summary += "\n🤖 نسخه " + botVersion
 
-    // دکمه کپی برای خروجی‌های کوچک (نیازمند فعال‌بودن Inline Mode)
     kb := buildCopyKeyboard(res.URIs)
 
     switch {
@@ -532,7 +525,7 @@ func deleteProgress(chatID int64, msgID int) {
     _, _ = bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 }
 
-// دکمه «📋 کپی» فقط برای ۱ تا ۲ کانفیگ کوتاه (نیاز به /setinline در BotFather دارد)
+// دکمه «📋 کپی» فقط برای ۱ تا ۲ کانفیگ کوتاه
 func buildCopyKeyboard(uris []string) *tgbotapi.InlineKeyboardMarkup {
     if len(uris) == 0 || len(uris) > 2 {
         return nil
@@ -545,7 +538,7 @@ func buildCopyKeyboard(uris []string) *tgbotapi.InlineKeyboardMarkup {
     var rows [][]tgbotapi.InlineKeyboardButton
     for _, u := range uris {
         rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonSwitch("📋 کپی کانفیگ", u),("📋 کپی کانفیگ", u),
+            tgbotapi.NewInlineKeyboardButtonSwitch("📋 کپی کانفیگ", u),
         ))
     }
     kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
@@ -794,7 +787,7 @@ func processUniversal(data []byte, depth int) (*processResult, error) {
     return nil, fmt.Errorf("هیچ فرمت شناخته‌شده‌ای در ورودی پیدا نشد")
 }
 
-const zipTotalLimit = 100 << 20 // سقف تجمعی محتویات ZIP (ضد zip-bomb)
+const zipTotalLimit = 100 << 20
 
 func processZIP(data []byte, depth int) (*processResult, error) {
     zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
