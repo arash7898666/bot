@@ -15,10 +15,12 @@ import (
     "errors"
     "fmt"
     "io"
+    "log"
     "net/url"
     "regexp"
     "strings"
     "sync"
+    "time"
     "unicode/utf16"
 
     "github.com/vmihailenco/msgpack/v5"
@@ -86,22 +88,49 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
     return res, err, false
 }
 
-// ─────────────── باندل رمزدار SlipNet ───────────────
+// ─────────────── باندل رمزدار SlipNet (با TTL و پاک‌سازی دوره‌ای) ───────────────
+
+type pendingBundle struct {
+    data    []byte
+    created time.Time
+}
 
 var pendingBundles sync.Map
 
+const bundleTTL = 10 * time.Minute
+
 func setPendingBundle(chatID int64, data []byte) {
-    pendingBundles.Store(chatID, data)
+    pendingBundles.Store(chatID, pendingBundle{data: data, created: time.Now()})
 }
 
-func takePendingBundle(chatID int64) ([]byte, bool) {
-    if v, ok := pendingBundles.Load(chatID); ok {
-        pendingBundles.Delete(chatID)
-        if b, ok2 := v.([]byte); ok2 {
-            return b, true
-        }
+// خروجی: (داده، پیدا شد، منقضی) — اتمیک با LoadAndDelete
+func takePendingBundle(chatID int64) ([]byte, bool, bool) {
+    v, ok := pendingBundles.LoadAndDelete(chatID)
+    if !ok {
+        return nil, false, false
     }
-    return nil, false
+    b, ok := v.(pendingBundle)
+    if !ok {
+        return nil, false, false
+    }
+    if time.Since(b.created) > bundleTTL {
+        return nil, false, true
+    }
+    return b.data, true, false
+}
+
+// پاک‌سازی باندل‌های رهاشده — جلوگیری از نشتی حافظه
+func startBundleReaper() {
+    go func() {
+        for range time.Tick(5 * time.Minute) {
+            pendingBundles.Range(func(k, v any) bool {
+                if b, ok := v.(pendingBundle); ok && time.Since(b.created) > bundleTTL {
+                    pendingBundles.Delete(k)
+                }
+                return true
+            })
+        }
+    }()
 }
 
 func trySlipnetBundleDecrypt(bundleData []byte, password string) (*processResult, error) {
@@ -207,9 +236,16 @@ const (
     slipKeySize       = 32
 )
 
+// اسکیماها با کپی مستقل (extend) ساخته می‌شوند تا اسلایس پایه هرگز دستکاری نشود
 var slipSchemas = func() map[string][]string {
+    extend := func(base []string, extra ...string) []string {
+        out := make([]string, 0, len(base)+len(extra))
+        out = append(out, base...)
+        return append(out, extra...)
+    }
+
     v1 := []string{"Version", "Tunnel Type/Mode", "Name", "Domain", "Resolvers", "AuthMode", "KeepAlive", "CC", "Port", "Host", "GSO"}
-    v20 := append(v1,
+    v20 := extend(v1,
         "DNSTT Public Key", "SOCKS Username", "SOCKS Password", "SSH Enabled", "SSH Username",
         "SSH Password", "SSH Port", "Forward DNS thru SSH", "SSH Host", "Use Server DNS",
         "DoH URL", "DNS Transport", "SSH Auth Type", "SSH Private Key (B64)", "SSH Key Passphrase (B64)",
@@ -219,27 +255,42 @@ var slipSchemas = func() map[string][]string {
         "VayDNS DNSTT Compat", "VayDNS Record Type", "VayDNS Max Qname Len", "VayDNS RPS", "VayDNS Idle Timeout",
         "VayDNS Keepalive", "VayDNS UDP Timeout", "VayDNS Max Num Labels", "VayDNS Client Id Size",
     )
-    v21 := append(v20,
+    v21 := extend(v20,
         "SSH TLS Enabled", "SSH TLS SNI", "SSH HTTP Proxy Host", "SSH HTTP Proxy Port", "SSH HTTP Proxy Custom Host",
         "SSH WS Enabled", "SSH WS Path", "SSH WS Use TLS", "SSH WS Custom Host",
     )
-    v22 := append(v21, "SSH Payload (B64)")
-    v24 := append(v22, "Resolver Mode", "RR Spread Count")
-    v25 := append(v24,
+    v22 := extend(v21, "SSH Payload (B64)")
+    v24 := extend(v22, "Resolver Mode", "RR Spread Count")
+    v25 := extend(v24,
         "VLESS UUID", "VLESS Security", "VLESS Transport", "VLESS WS Path", "CDN IP",
         "CDN Port", "SNI Fragment Enabled", "SNI Fragment Strategy", "SNI Fragment Delay MS", "Legacy SNI (Empty)",
     )
-    v27 := append(v25,
+    v27 := extend(v25,
         "CH Padding Enabled", "WS Header Obfuscation", "WS Padding Enabled",
         "SNI Spoof TTL", "Fake Decoy Host", "TCP Max Seg",
     )
-    v28 := append(v27, "VLESS SNI")
+    v28 := extend(v27, "VLESS SNI")
+
     return map[string][]string{
         "1": v1, "20": v20, "21": v21, "22": v22, "23": v24, "24": v24,
         "25": v25, "26": v27, "27": v27, "28": v28,
     }
 }()
 
+// نگاشت نام فیلد → اندیس (جست‌وجوی O(1) به‌جای خطی)
+var slipFieldIndex = func() map[string]map[string]int {
+    out := map[string]map[string]int{}
+    for ver, schema := range slipSchemas {
+        m := make(map[string]int, len(schema))
+        for i, label := range schema {
+            m[label] = i
+        }
+        out[ver] = m
+    }
+    return out
+}()
+
+// فرمت موبایل-پسند: «Label: value» به‌جای ستون‌های به‌هم‌ریخته
 func parseSlipProfile(decryptedText string) string {
     decryptedText = strings.TrimSuffix(decryptedText, "|")
     parts := strings.Split(decryptedText, "|")
@@ -250,9 +301,7 @@ func parseSlipProfile(decryptedText string) string {
     schema, exists := slipSchemas[verStr]
 
     var sb strings.Builder
-    sb.WriteString(fmt.Sprintf("\n[+] Detected Profile Version: %s\n", verStr))
-    sb.WriteString(fmt.Sprintf("%-30s | %s\n", "FIELD", "VALUE"))
-    sb.WriteString(strings.Repeat("-", 80) + "\n")
+    sb.WriteString(fmt.Sprintf("\n[+] Profile Version: %s\n", verStr))
 
     for i, value := range parts {
         label := ""
@@ -269,9 +318,9 @@ func parseSlipProfile(decryptedText string) string {
         case "Is Locked", "SSH TLS Enabled", "SSH WS Enabled", "SSH WS Use TLS",
             "SNI Fragment Enabled", "CH Padding Enabled", "WS Header Obfuscation", "WS Padding Enabled":
             if value == "1" {
-                displayValue = "🔒 YES / ✅ TRUE"
+                displayValue = "🔒 YES"
             } else {
-                displayValue = "🔓 NO / ❌ FALSE"
+                displayValue = "🔓 NO"
             }
         case "VayDNS DNSTT Compat", "Resolvers Hidden", "GSO", "DNSTT Authoritative",
             "SSH Enabled", "Forward DNS thru SSH", "Use Server DNS", "Allow Sharing", "NoizDNS Stealth":
@@ -281,28 +330,27 @@ func parseSlipProfile(decryptedText string) string {
                 displayValue = "❌ FALSE"
             }
         }
-        sb.WriteString(fmt.Sprintf("%-30s | %s\n", label, displayValue))
+        sb.WriteString(fmt.Sprintf("%s: %s\n", label, displayValue))
     }
     return sb.String()
 }
-
-// ─────────────── ساخت vless:// از فیلدهای پروفایل SlipNet ───────────────
 
 func slipField(parts []string, name string) string {
     if len(parts) == 0 {
         return ""
     }
-    schema, ok := slipSchemas[parts[0]]
+    m, ok := slipFieldIndex[parts[0]]
     if !ok {
         return ""
     }
-    for i, label := range schema {
-        if label == name && i < len(parts) {
-            return strings.TrimSpace(parts[i])
-        }
+    i, ok := m[name]
+    if !ok || i >= len(parts) {
+        return ""
     }
-    return ""
+    return strings.TrimSpace(parts[i])
 }
+
+// ─────────────── ساخت vless:// از فیلدهای پروفایل SlipNet ───────────────
 
 func slipExtractVless(plaintext string) string {
     plaintext = strings.TrimSuffix(plaintext, "|")
@@ -311,7 +359,6 @@ func slipExtractVless(plaintext string) string {
         return ""
     }
 
-    // فقط وقتی نوع تونل vless است
     if !strings.EqualFold(slipField(parts, "Tunnel Type/Mode"), "vless") {
         return ""
     }
@@ -320,7 +367,6 @@ func slipExtractVless(plaintext string) string {
         return ""
     }
 
-    // آدرس اتصال: CDN IP در اولویت است، وگرنه Domain
     addr := slipField(parts, "CDN IP")
     port := slipField(parts, "CDN Port")
     if addr == "" {
@@ -373,7 +419,15 @@ func slipExtractVless(plaintext string) string {
         uuid, formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
-func slipDecryptBlob(keyHex, blobStr string) (string, error) {
+// AEAD کلید ثابت — یک‌بار ساخته می‌شود (cipher.AEAD برای استفاده همزمان امن است)
+var slipAEAD = func() cipher.AEAD {
+    key, _ := hex.DecodeString(slipKeyHex)
+    block, _ := aes.NewCipher(key)
+    aead, _ := cipher.NewGCM(block)
+    return aead
+}()
+
+func slipDecryptBlob(blobStr string) (string, error) {
     data, ok := decodeB64Loose(strings.Join(strings.Fields(blobStr), ""))
     if !ok {
         return "", fmt.Errorf("base64 نامعتبر")
@@ -381,18 +435,7 @@ func slipDecryptBlob(keyHex, blobStr string) (string, error) {
     if len(data) < 13 {
         return "", fmt.Errorf("blob too short")
     }
-    key, _ := hex.DecodeString(keyHex)
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return "", err
-    }
-    aesgcm, err := cipher.NewGCM(block)
-    if err != nil {
-        return "", err
-    }
-    nonce := data[1:13]
-    ciphertext := data[13:]
-    plaintext, err := aesgcm.Open(nil, nonce, ciphertext, nil)
+    plaintext, err := slipAEAD.Open(nil, data[1:13], data[13:], nil)
     if err != nil {
         return "", fmt.Errorf("decryption failed")
     }
@@ -439,7 +482,7 @@ func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
     res := &processResult{}
 
     // ۱) رمزگشایی با کلید ثابت
-    if plaintext, err := slipDecryptBlob(slipKeyHex, text); err == nil {
+    if plaintext, err := slipDecryptBlob(text); err == nil {
         res.Raw = append(res.Raw, parseSlipProfile(plaintext))
         if uri := slipExtractVless(plaintext); uri != "" {
             res.URIs = append(res.URIs, uri)
@@ -559,6 +602,9 @@ func getHappEngine() (*happEngine, error) {
         p := &happEngine{privateKeys: make(map[string]*rsa.PrivateKey)}
         p.linkRegex = regexp.MustCompile(`^(?:happ://)?([^/]+)/(.+)$`)
         versionMap := []string{"crypt", "crypt2", "crypt3", "crypt4"}
+        if len(happPKCS1KeysB64) > len(versionMap) {
+            log.Printf("⚠️ تعداد کلیدهای Happ بیشتر از نسخه‌های شناخته‌شده است (%d > %d)", len(happPKCS1KeysB64), len(versionMap))
+        }
         for idx, b64RawKey := range happPKCS1KeysB64 {
             if idx >= len(versionMap) {
                 break
