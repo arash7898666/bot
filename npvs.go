@@ -20,6 +20,7 @@ import (
 )
 
 const npvsWrapSize = 60
+const npvsEngine = "NPVS Engine v2"
 
 // ═══════════════════ رمزهای در انتظار ═══════════════════
 
@@ -64,22 +65,25 @@ func startPassReaper() {
     }()
 }
 
-// ═══════════════════ Regex — هر دو حالت escape/ساده ═══════════════════
+// ═══════════════════ Regex — مقاوم به هر تعداد escape ═══════════════════
+// (?:\\*) = صفر یا چند بک‌اسلش — هم "field" هم \"field\" هم \\"field\\" را می‌گیرد
 
 var (
-    reAddress  = regexp.MustCompile(`\\?"address\\?"\s*:\s*\\?"([^"\\]+)\\?"`)
-    rePort     = regexp.MustCompile(`\\?"port\\?"\s*:\s*(\d+)`)
-    rePassword = regexp.MustCompile(`\\?"password\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reProtocol = regexp.MustCompile(`\\?"protocol\\?"\s*:\s*\\?"(trojan|vless|vmess|shadowsocks)\\?"`)
-    reNetwork  = regexp.MustCompile(`\\?"network\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reWSSHost  = regexp.MustCompile(`\\?"host\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reWSPath   = regexp.MustCompile(`\\?"path\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reSecurity = regexp.MustCompile(`\\?"security\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reSNI      = regexp.MustCompile(`\\?"serverName\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reFinger   = regexp.MustCompile(`\\?"fingerprint\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reRemarks  = regexp.MustCompile(`\\?"remarks\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
-    reUUID     = regexp.MustCompile(`\\?"id\\?"\s*:\s*\\?"([^"\\]+)\\?"`)
-    reMethod   = regexp.MustCompile(`\\?"method\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reProtocol  = regexp.MustCompile(`(?:\\*)"protocol(?:\\*)"\s*:\s*(?:\\*)"(trojan|vless|vmess|shadowsocks)(?:\\*)"`)
+    reAddress   = regexp.MustCompile(`(?:\\*)"address(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reServer    = regexp.MustCompile(`(?:\\*)"server(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reServerPort = regexp.MustCompile(`(?:\\*)"serverPort(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
+    rePort      = regexp.MustCompile(`(?:\\*)"port(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
+    rePassword  = regexp.MustCompile(`(?:\\*)"password(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reMethod    = regexp.MustCompile(`(?:\\*)"method(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reNetwork   = regexp.MustCompile(`(?:\\*)"network(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reWSSHost   = regexp.MustCompile(`(?:\\*)"host(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reWSPath    = regexp.MustCompile(`(?:\\*)"path(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reSecurity  = regexp.MustCompile(`(?:\\*)"security(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reSNI       = regexp.MustCompile(`(?:\\*)"serverName(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reFinger    = regexp.MustCompile(`(?:\\*)"fingerprint(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reRemarks   = regexp.MustCompile(`(?:\\*)"remarks(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reUUID      = regexp.MustCompile(`(?:\\*)"id(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
 )
 
 func firstGroup(re *regexp.Regexp, s string) string {
@@ -90,7 +94,6 @@ func firstGroup(re *regexp.Regexp, s string) string {
     return ""
 }
 
-// splitHostPort: جدا کردن host و port از رشته‌ای مثل "104.17.122.116:443"
 func splitHostPort(s string) (string, string) {
     if i := strings.LastIndex(s, ":"); i > 0 {
         host, port := s[:i], s[i+1:]
@@ -101,23 +104,98 @@ func splitHostPort(s string) (string, string) {
     return s, ""
 }
 
-// normalizeAddr: پاک‌سازی آدرس + جدا کردن پورت چسبیده
 func normalizeAddr(addr, port string) (string, string) {
-    if strings.Contains(addr, ":") && port == "" {
+    if port == "" && strings.Contains(addr, ":") {
         return splitHostPort(addr)
     }
     return addr, port
 }
 
-// regexExtractFromText — استخراج مستقیم کانفیگ‌ها بدون پارس JSON
-func regexExtractFromText(text string) []string {
-    var uris []string
+// ═══════════════════ 🔧 دیباگ — خودش می‌گوید مشکل کجاست ═══════════════════
 
-    protoIdxs := reProtocol.FindAllStringSubmatchIndex(text, -1)
-    if len(protoIdxs) == 0 {
-        return nil
+func debugPreview(s string, n int) string {
+    if len(s) > n {
+        s = s[:n]
     }
+    s = strings.ReplaceAll(s, "\\", "⇧")
+    s = strings.ReplaceAll(s, "\n", "⏎")
+    s = strings.ReplaceAll(s, "\r", "⏎")
+    s = strings.ReplaceAll(s, "\t", "→")
+    return s
+}
 
+func npvsDebugInfo(pt []byte) string {
+    lower := strings.ToLower(string(pt))
+    var sb strings.Builder
+    sb.WriteString("🔧 " + npvsEngine + " — حالت دیباگ\n")
+    sb.WriteString("ℹ️ لینک ساخته نشد — علت را بررسی کنید:\n\n")
+    sb.WriteString(fmt.Sprintf("📊 حجم متن رمزگشایی‌شده: %d بایت\n", len(pt)))
+    sb.WriteString("🔍 تعداد علامت‌ها در متن:\n")
+    fmt.Fprintf(&sb, "   protocol=%d | trojan=%d | vless=%d | vmess=%d\n",
+        strings.Count(lower, "protocol"), strings.Count(lower, "trojan"),
+        strings.Count(lower, "vless"), strings.Count(lower, "vmess"))
+    fmt.Fprintf(&sb, "   server=%d | password=%d | method=%d\n",
+        strings.Count(lower, "server"), strings.Count(lower, "password"),
+        strings.Count(lower, "method"))
+    fmt.Fprintf(&sb, "   v2rayjson=%d | configtype=%d | outbounds=%d\n",
+        strings.Count(lower, "v2rayjson"), strings.Count(lower, "configtype"),
+        strings.Count(lower, "outbounds"))
+    sb.WriteString("\n📝 ۴۰۰ کاراکتر اول (⇧ = بک‌اسلش، ⏎ = خط جدید):\n")
+    sb.WriteString(debugPreview(string(pt), 400))
+    return sb.String()
+}
+
+// ═══════════════════ مسیر ۱: استخراج با protocol ═══════════════════
+
+func regexExtractFromText(text string) []string {
+    uris := extractByProtocol(text)
+    profileUris := extractByProfile(text)
+
+    // فقط لینک‌های پروفایلی که تکراری نیستند
+    for _, pu := range profileUris {
+        dup := false
+        for _, u := range uris {
+            if uriKey(u) == uriKey(pu) {
+                dup = true
+                break
+            }
+        }
+        if !dup {
+            uris = append(uris, pu)
+        }
+    }
+    return dedupeByURI(uris)
+}
+
+func uriKey(u string) string {
+    i := strings.Index(u, "://")
+    if i < 0 {
+        return u
+    }
+    rest := u[i+3:]
+    if j := strings.IndexAny(rest, "?#"); j >= 0 {
+        rest = rest[:j]
+    }
+    return rest
+}
+
+func dedupeByURI(in []string) []string {
+    seen := map[string]struct{}{}
+    out := make([]string, 0, len(in))
+    for _, u := range in {
+        k := uriKey(u)
+        if _, ok := seen[k]; ok {
+            continue
+        }
+        seen[k] = struct{}{}
+        out = append(out, u)
+    }
+    return out
+}
+
+func extractByProtocol(text string) []string {
+    var uris []string
+    protoIdxs := reProtocol.FindAllStringSubmatchIndex(text, -1)
     for _, pm := range protoIdxs {
         proto := text[pm[2]:pm[3]]
         windowEnd := pm[1] + 3000
@@ -125,7 +203,6 @@ func regexExtractFromText(text string) []string {
             windowEnd = len(text)
         }
         window := text[pm[1]:windowEnd]
-
         switch proto {
         case "trojan":
             if uri := buildTrojanFromRegex(window, text); uri != "" {
@@ -135,15 +212,62 @@ func regexExtractFromText(text string) []string {
             if uri := buildVlessFromRegex(window, text); uri != "" {
                 uris = append(uris, uri)
             }
+        case "vmess":
+            if uri := buildVMessFromRegex(window, text); uri != "" {
+                uris = append(uris, uri)
+            }
         case "shadowsocks":
             if uri := buildSSFromRegex(window, text); uri != "" {
                 uris = append(uris, uri)
             }
         }
     }
-
-    return dedupe(uris)
+    return uris
 }
+
+// ═══════════════════ مسیر ۲: استخراج از پروفایل (بدون protocol) ═══════════════════
+// برای کانفیگ‌هایی که password/method مستقیم در v2rayProfile هستند
+
+func extractByProfile(text string) []string {
+    var uris []string
+    serverIdxs := reServer.FindAllStringSubmatchIndex(text, -1)
+    for _, sm := range serverIdxs {
+        server := text[sm[2]:sm[3]]
+        winEnd := sm[1] + 2500
+        if winEnd > len(text) {
+            winEnd = len(text)
+        }
+        window := text[sm[1]:winEnd]
+
+        port := firstGroup(reServerPort, window)
+        if port == "" {
+            port = firstGroup(rePort, window)
+        }
+        pwd := firstGroup(rePassword, window)
+        if pwd == "" {
+            continue // بدون رمز — قابل استفاده نیست
+        }
+        method := firstGroup(reMethod, window)
+        remarks := firstGroup(reRemarks, window)
+
+        server, port = normalizeAddr(server, port)
+        if port == "" {
+            port = "443"
+        }
+
+        if method != "" {
+            userInfo := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + pwd))
+            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s",
+                userInfo, formatHost(server), port, cleanRemarks(remarks)))
+        } else {
+            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s",
+                url.QueryEscape(pwd), formatHost(server), port, cleanRemarks(remarks)))
+        }
+    }
+    return uris
+}
+
+// ═══════════════════ ساخت لینک‌ها ═══════════════════
 
 func buildTrojanFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
@@ -196,15 +320,12 @@ func buildVlessFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
     uuid := firstGroup(reUUID, window)
-    if addr == "" {
+    if addr == "" || uuid == "" {
         return ""
     }
     addr, port = normalizeAddr(addr, port)
     if port == "" {
         port = "443"
-    }
-    if uuid == "" {
-        return ""
     }
 
     q := url.Values{}
@@ -240,20 +361,60 @@ func buildVlessFromRegex(window, fullText string) string {
         uuid, formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
-func buildSSFromRegex(window, fullText string) string {
+func buildVMessFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
-    pass := firstGroup(rePassword, window)
-    method := firstGroup(reMethod, window)
-    if addr == "" {
+    uuid := firstGroup(reUUID, window)
+    if addr == "" || uuid == "" {
         return ""
     }
     addr, port = normalizeAddr(addr, port)
     if port == "" {
         port = "443"
     }
-    if pass == "" {
+
+    netw := firstGroup(reNetwork, window)
+    if netw == "" {
+        netw = "tcp"
+    }
+    tlsFlag := ""
+    if sec := firstGroup(reSecurity, window); sec == "tls" || sec == "reality" {
+        tlsFlag = "tls"
+    }
+    host, path := "", ""
+    if netw == "ws" {
+        host = firstGroup(reWSSHost, window)
+        path = firstGroup(reWSPath, window)
+    }
+
+    remarks := firstGroup(reRemarks, window)
+    if remarks == "" {
+        remarks = firstGroup(reRemarks, fullText)
+    }
+
+    obj := map[string]string{
+        "v": "2", "ps": cleanRemarks(remarks), "add": addr, "port": port,
+        "id": uuid, "aid": "0", "scy": "auto", "net": netw, "type": "none",
+        "host": host, "path": path, "tls": tlsFlag,
+    }
+    b, err := json.Marshal(obj)
+    if err != nil {
         return ""
+    }
+    return "vmess://" + base64.StdEncoding.EncodeToString(b)
+}
+
+func buildSSFromRegex(window, fullText string) string {
+    addr := firstGroup(reAddress, window)
+    port := firstGroup(rePort, window)
+    pass := firstGroup(rePassword, window)
+    method := firstGroup(reMethod, window)
+    if addr == "" || pass == "" {
+        return ""
+    }
+    addr, port = normalizeAddr(addr, port)
+    if port == "" {
+        port = "443"
     }
     if method == "" {
         method = "aes-256-gcm"
@@ -330,7 +491,7 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         }
     }
 
-    // مسیر متنی (fallback): NPVS%{JSON} + دنباله
+    // مسیر متنی (fallback)
     if bytes.HasPrefix(b, []byte("NPVS")) {
         start := bytes.IndexByte(b, '{')
         if start > 4 {
@@ -446,7 +607,6 @@ func npvsGetBlob(name string, want int) []byte {
 
 func loadWB() {
     wbOnce.Do(func() {
-        // جداول مشترک از tables.txt (همان NPVT — طبق README ریپو مشترک‌اند)
         wbTy = tyBoxes
         wbMbl = mbl
         wbXorBin = make([]byte, wbXorSize)
@@ -457,8 +617,6 @@ func loadWB() {
                 }
             }
         }
-
-        // نسخه‌های tboxes_last: محلی + دانلودی
         base := tboxesLast
         wbTlastVariants = append(wbTlastVariants, &base)
         for _, name := range []string{"tboxes_last.bin", "tboxes_last_v2.bin"} {
@@ -594,9 +752,6 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
     if password == "" {
         return nil, fmt.Errorf("رمز لازم است")
     }
-    if p.Iters < 1 || p.Iters > 10000000 {
-        return nil, fmt.Errorf("تعداد تکرار نامعتبر: %d", p.Iters)
-    }
     salt, err := npvsB64URL(p.Salt)
     if err != nil || len(salt) < 16 {
         return nil, fmt.Errorf("salt نامعتبر")
@@ -660,7 +815,6 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, err, false
     }
 
-    // ۱) رمز دلخواه → بپرس
     if env.hdr.Passphrase != nil {
         setPendingPass(chatID, "npvs", data)
         if env.hdr.Policy.DisplayMessage != "" {
@@ -671,23 +825,23 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
-    // ۲) appKey → باز کردن با White-Box + استخراج Regex
     if env.hdr.AppKey != nil {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
             if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
                 res.URIs = regexExtractFromText(string(pt))
-                if len(res.URIs) == 0 && len(pt) > 0 {
-                    res.Raw = append(res.Raw, string(pt))
+                if len(res.URIs) > 0 {
+                    return res, nil, false
                 }
+                // 🔧 لینک ساخته نشد → حالت دیباگ
+                res.Raw = append(res.Raw, npvsDebugInfo(pt))
                 return res, nil, false
             }
         }
     }
 
-    // ۳) نمایش وضعیت
     var sb strings.Builder
-    sb.WriteString("═══ NPVS ═══\n")
+    sb.WriteString("🔧 " + npvsEngine + "\n")
     sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
     if env.hdr.Policy.DisplayMessage != "" {
         sb.WriteString("💬 " + env.hdr.Policy.DisplayMessage + "\n")
@@ -695,9 +849,9 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
     if env.hdr.AppKey != nil {
         sb.WriteString("⚠️ قفل appKey باز نشد")
     } else if len(env.hdr.Recipients) > 0 {
-        sb.WriteString("🔒 E2E — فقط با کلید خصوصی گیرنده باز می‌شود")
+        sb.WriteString("🔒 E2E — فقط با کلید خصوصی گیرنده")
     } else {
-        sb.WriteString("📡 این فایل فقط شناسه ارجاع است")
+        sb.WriteString("📡 شناسه ارجاع")
     }
     res.Raw = append(res.Raw, sb.String())
     return res, nil, false
@@ -712,7 +866,6 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
-    // نسخه‌های مختلف رمز: با فاصله / بدون فاصله / کوچک / بزرگ
     attempts := []string{
         password,
         strings.TrimSpace(password),
@@ -722,7 +875,6 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
     }
     seen := map[string]bool{}
     var dek []byte
-
     for _, pwd := range attempts {
         if pwd == "" || seen[pwd] {
             continue
@@ -742,11 +894,11 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
 
-    // ✅ استخراج با Regex — مستقیم از متن
     res := &processResult{}
     res.URIs = regexExtractFromText(string(pt))
-    if len(res.URIs) == 0 && len(pt) > 0 {
-        res.Raw = append(res.Raw, string(pt))
+    if len(res.URIs) == 0 {
+        // 🔧 لینک ساخته نشد → حالت دیباگ
+        res.Raw = append(res.Raw, npvsDebugInfo(pt))
     }
     return res, nil
 }
