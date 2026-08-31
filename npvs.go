@@ -64,7 +64,7 @@ func startPassReaper() {
     }()
 }
 
-// ═══════════════════ Regex — هر دو حالت: با/بدون escape ═══════════════════
+// ═══════════════════ Regex — هر دو حالت escape/ساده ═══════════════════
 
 var (
     reAddress  = regexp.MustCompile(`\\?"address\\?"\s*:\s*\\?"([^"\\]+)\\?"`)
@@ -90,7 +90,26 @@ func firstGroup(re *regexp.Regexp, s string) string {
     return ""
 }
 
-// regexExtractFromText — استخراج مستقیم کانفیگ‌ها از متن (بدون پارس JSON)
+// splitHostPort: جدا کردن host و port از رشته‌ای مثل "104.17.122.116:443"
+func splitHostPort(s string) (string, string) {
+    if i := strings.LastIndex(s, ":"); i > 0 {
+        host, port := s[:i], s[i+1:]
+        if port != "" && strings.Trim(port, "0123456789") == "" {
+            return host, port
+        }
+    }
+    return s, ""
+}
+
+// normalizeAddr: پاک‌سازی آدرس + جدا کردن پورت چسبیده
+func normalizeAddr(addr, port string) (string, string) {
+    if strings.Contains(addr, ":") && port == "" {
+        return splitHostPort(addr)
+    }
+    return addr, port
+}
+
+// regexExtractFromText — استخراج مستقیم کانفیگ‌ها بدون پارس JSON
 func regexExtractFromText(text string) []string {
     var uris []string
 
@@ -130,8 +149,12 @@ func buildTrojanFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
     pass := firstGroup(rePassword, window)
-    if addr == "" || port == "" {
+    if addr == "" {
         return ""
+    }
+    addr, port = normalizeAddr(addr, port)
+    if port == "" {
+        port = "443"
     }
 
     q := url.Values{}
@@ -173,7 +196,14 @@ func buildVlessFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
     uuid := firstGroup(reUUID, window)
-    if addr == "" || port == "" || uuid == "" {
+    if addr == "" {
+        return ""
+    }
+    addr, port = normalizeAddr(addr, port)
+    if port == "" {
+        port = "443"
+    }
+    if uuid == "" {
         return ""
     }
 
@@ -215,7 +245,14 @@ func buildSSFromRegex(window, fullText string) string {
     port := firstGroup(rePort, window)
     pass := firstGroup(rePassword, window)
     method := firstGroup(reMethod, window)
-    if addr == "" || port == "" || pass == "" {
+    if addr == "" {
+        return ""
+    }
+    addr, port = normalizeAddr(addr, port)
+    if port == "" {
+        port = "443"
+    }
+    if pass == "" {
         return ""
     }
     if method == "" {
@@ -293,7 +330,7 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         }
     }
 
-    // مسیر متنی (fallback)
+    // مسیر متنی (fallback): NPVS%{JSON} + دنباله
     if bytes.HasPrefix(b, []byte("NPVS")) {
         start := bytes.IndexByte(b, '{')
         if start > 4 {
@@ -361,10 +398,8 @@ func npvsB64URL(s string) ([]byte, error) {
 
 // ═══════════════════ White-Box ═══════════════════
 
-const (
-    wbTlastSize = 4096
-    wbXorSize   = 24576
-)
+const wbTlastSize = 4096
+const wbXorSize = 24576
 
 var (
     wbShiftRows = [16]int{0, 5, 10, 15, 4, 9, 14, 3, 8, 13, 2, 7, 12, 1, 6, 11}
@@ -411,7 +446,7 @@ func npvsGetBlob(name string, want int) []byte {
 
 func loadWB() {
     wbOnce.Do(func() {
-        // جداول مشترک از tables.txt (همان NPVT)
+        // جداول مشترک از tables.txt (همان NPVT — طبق README ریپو مشترک‌اند)
         wbTy = tyBoxes
         wbMbl = mbl
         wbXorBin = make([]byte, wbXorSize)
@@ -423,7 +458,7 @@ func loadWB() {
             }
         }
 
-        // نسخه‌های tboxes_last
+        // نسخه‌های tboxes_last: محلی + دانلودی
         base := tboxesLast
         wbTlastVariants = append(wbTlastVariants, &base)
         for _, name := range []string{"tboxes_last.bin", "tboxes_last_v2.bin"} {
@@ -556,6 +591,12 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
     if p.Kdf != "pbkdf2-hmac-sha256" {
         return nil, fmt.Errorf("KDF: %s", p.Kdf)
     }
+    if password == "" {
+        return nil, fmt.Errorf("رمز لازم است")
+    }
+    if p.Iters < 1 || p.Iters > 10000000 {
+        return nil, fmt.Errorf("تعداد تکرار نامعتبر: %d", p.Iters)
+    }
     salt, err := npvsB64URL(p.Salt)
     if err != nil || len(salt) < 16 {
         return nil, fmt.Errorf("salt نامعتبر")
@@ -574,7 +615,7 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
 
 func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
     if len(body) < 16 {
-        return nil, fmt.Errorf("بدنه ناقص")
+        return nil, fmt.Errorf("بدنه ناقص — فایل را «آپلود» کنید نه متن")
     }
     bodies := [][]byte{body}
     if len(body) > 68 {
@@ -608,7 +649,7 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
             }
         }
     }
-    return nil, fmt.Errorf("بدنه باز نشد — فایل را «آپلود» کنید نه متن")
+    return nil, fmt.Errorf("بدنه باز نشد")
 }
 
 // ═══════════════════ نقطه ورود ═══════════════════
@@ -630,14 +671,13 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
-    // ۲) appKey → باز کردن با White-Box
+    // ۲) appKey → باز کردن با White-Box + استخراج Regex
     if env.hdr.AppKey != nil {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
             if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
-                // ✅ استخراج با Regex
                 res.URIs = regexExtractFromText(string(pt))
-                if len(res.URIs) == 0 {
+                if len(res.URIs) == 0 && len(pt) > 0 {
                     res.Raw = append(res.Raw, string(pt))
                 }
                 return res, nil, false
@@ -672,7 +712,7 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
-    // نسخه‌های مختلف رمز
+    // نسخه‌های مختلف رمز: با فاصله / بدون فاصله / کوچک / بزرگ
     attempts := []string{
         password,
         strings.TrimSpace(password),
@@ -702,10 +742,10 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
 
-    // ✅ استخراج با Regex — بدون نیاز به پارس JSON
+    // ✅ استخراج با Regex — مستقیم از متن
     res := &processResult{}
     res.URIs = regexExtractFromText(string(pt))
-    if len(res.URIs) == 0 {
+    if len(res.URIs) == 0 && len(pt) > 0 {
         res.Raw = append(res.Raw, string(pt))
     }
     return res, nil
