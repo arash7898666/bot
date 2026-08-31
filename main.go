@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.7-NPVS-FIX4"
+const botVersion = "7.8-NPVS-REGEX"
 
 const (
     msgLimit    = 3900
@@ -340,7 +340,7 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
-    // ─── فایل رمزدار در انتظار ───
+    // ─── فایل رمزدار در انتظار (SlipNet / NPVS) ───
     if strings.TrimSpace(msg.Text) != "" {
         if kind, fd, found, expired := takePendingPass(chatID); found || expired {
             if expired {
@@ -828,8 +828,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    // فیکس NPVS: حذف خطوط خام و تب (خارج از رشته‌ها امن نیست،
-    // اما فایل‌های NPVS فاصله‌های معنادار بیرون رشته‌ها ندارند)
     parseable := normalizeJSONForParse(pt)
 
     var root any
@@ -841,6 +839,11 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         var uris []string
         walkJSON(root, &uris)
         if len(uris) > 0 {
+            res.URIs = append(res.URIs, uris...)
+            return
+        }
+        // fallback: Regex هم امتحان کن
+        if uris := regexExtractFromText(string(pt)); len(uris) > 0 {
             res.URIs = append(res.URIs, uris...)
             return
         }
@@ -878,13 +881,18 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
+    // fallback: Regex
+    if uris := regexExtractFromText(string(pt)); len(uris) > 0 {
+        res.URIs = append(res.URIs, uris...)
+        return
+    }
+
     if s := strings.TrimSpace(string(pt)); s != "" {
         res.Raw = append(res.Raw, s)
     }
 }
 
-// normalizeJSONForParse: خطوط جدید خام و تب را فقط بیرون از رشته‌ها حذف می‌کند
-// (وضعیت رشته را با شمارش escape دنبال می‌کند — داخل رشته دست نمی‌زند)
+// normalizeJSONForParse: حذف فاصله‌ها فقط بیرون از رشته‌ها
 func normalizeJSONForParse(data []byte) []byte {
     if !bytes.ContainsAny(data, "\n\r\t") {
         return data
@@ -913,7 +921,7 @@ func normalizeJSONForParse(data []byte) []byte {
             inString = true
             out.WriteByte(b)
         case '\n', '\r', '\t', ' ':
-            // بیرون رشته — نادیده گرفته می‌شود
+            // بیرون رشته — حذف
         default:
             out.WriteByte(b)
         }
@@ -921,7 +929,6 @@ func normalizeJSONForParse(data []byte) []byte {
     return out.Bytes()
 }
 
-// splitJSONObjects — ✅ فیکس شد: شمارش براکت صحیح
 func splitJSONObjects(data []byte) [][]byte {
     var objects [][]byte
     depth := 0
@@ -1226,11 +1233,6 @@ func ctrIncrement(counter *[16]byte) {
 
 // ═══════════════════ پیمایش JSON ═══════════════════
 
-// cleanEmbeddedJSON — ✅ فیکس کامل: هر ۴ حالت
-// ۱) JSON خام معتبر → همان
-// ۲) چندخطی خام → خطوط حذف (بیرون رشته)
-// ۳) escape شده با \n متنی → حذف
-// ۴) دوبل-escape (رشته JSON داخل رشته) → unmarshal دوم
 func cleanEmbeddedJSON(c string) []byte {
     trimmed := strings.TrimSpace(c)
     if trimmed == "" {
@@ -1242,7 +1244,7 @@ func cleanEmbeddedJSON(c string) []byte {
         return []byte(trimmed)
     }
 
-    // حالت ۲: چندخطی خام — حذف فاصله‌ها فقط بیرون از رشته‌ها
+    // حالت ۲: چندخطی خام — حذف فاصله‌ها بیرون از رشته‌ها
     if normalized := normalizeJSONForParse([]byte(trimmed)); json.Valid(normalized) {
         return normalized
     }
@@ -1261,17 +1263,9 @@ func cleanEmbeddedJSON(c string) []byte {
         if json.Valid([]byte(inner)) {
             return []byte(inner)
         }
-        // inner چندخطی باشد
         if normalized := normalizeJSONForParse([]byte(inner)); json.Valid(normalized) {
             return normalized
         }
-    }
-
-    // حالت ۵: ترکیبی — همه فاصله‌ها
-    c5 := normalizeJSONForParse([]byte(trimmed))
-    c5s := strings.ReplaceAll(string(c5), "\\n", "")
-    if json.Valid([]byte(c5s)) {
-        return []byte(c5s)
     }
 
     return []byte(c3)
@@ -1639,19 +1633,9 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
     }
 
     obj := map[string]string{
-        "v":    "2",
-        "ps":   cleanRemarks(remarks),
-        "add":  v.Address,
-        "port": fmt.Sprintf("%d", v.Port),
-        "id":   u.Id,
-        "aid":  "0",
-        "scy":  scy,
-        "net":  network,
-        "type": "none",
-        "host": host,
-        "path": path,
-        "tls":  tlsFlag,
-        "sni":  sni,
+        "v": "2", "ps": cleanRemarks(remarks), "add": v.Address, "port": fmt.Sprintf("%d", v.Port),
+        "id": u.Id, "aid": "0", "scy": scy, "net": network, "type": "none",
+        "host": host, "path": path, "tls": tlsFlag, "sni": sni,
     }
     b, err := json.Marshal(obj)
     if err != nil {
@@ -1755,8 +1739,6 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     }
     return uris, nil
 }
-
-// ═══ فیکس ۷.۶/۷.۷: v2rayJson بدون Server هم پردازش شود ═══
 
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
