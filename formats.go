@@ -45,6 +45,7 @@ func cleanInvisible(s string) string {
     return invisibleRe.ReplaceAllString(s, "")
 }
 
+// ✅ نسخه جدید: NPVS رو هم هندل می‌کنه
 func processRouted(data []byte, ext string, chatID int64) (*processResult, error, bool) {
     switch ext {
     case ".slip":
@@ -70,7 +71,8 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
 
     text := cleanInvisible(string(data))
 
-    if strings.HasPrefix(text, "NPVS") {
+    // تشخیص NPVS در متن (هر جای متن)
+    if strings.Contains(text, "NPVS") {
         return handleNPVS(data, chatID)
     }
 
@@ -110,6 +112,7 @@ func trySlipnetBundleDecrypt(bundleData []byte, password string) (*processResult
     return res, nil
 }
 
+// ✅ نسخه جدید: بدون فایل txt — همه پیام
 func sendBundleResult(chatID int64, res *processResult) {
     if res == nil || (len(res.URIs) == 0 && len(res.Raw) == 0) {
         reply(chatID, "⚠️ محتوایی استخراج نشد.")
@@ -125,7 +128,7 @@ func sendBundleResult(chatID int64, res *processResult) {
     for _, r := range res.Raw {
         lines = append(lines, "", "─────── RAW ───────", r)
     }
-    summary := fmt.Sprintf("✅ %d کانفیگ • %d بلوک خام\n🤖 نسخه %s", len(res.URIs), len(res.Raw), botVersion)
+    summary := fmt.Sprintf("✅ %d کانفیگ • %d بلوک خام\n🤖 %s", len(res.URIs), len(res.Raw), botVersion)
     reply(chatID, summary)
     replyLines(chatID, lines)
 }
@@ -552,9 +555,6 @@ func getHappEngine() (*happEngine, error) {
         p := &happEngine{privateKeys: make(map[string]*rsa.PrivateKey)}
         p.linkRegex = regexp.MustCompile(`^(?:happ://)?([^/]+)/(.+)$`)
         versionMap := []string{"crypt", "crypt2", "crypt3", "crypt4"}
-        if len(happPKCS1KeysB64) > len(versionMap) {
-            fmt.Printf("⚠️ تعداد کلیدهای Happ بیشتر از نسخه‌های شناخته‌شده است (%d > %d)\n", len(happPKCS1KeysB64), len(versionMap))
-        }
         for idx, b64RawKey := range happPKCS1KeysB64 {
             if idx >= len(versionMap) {
                 break
