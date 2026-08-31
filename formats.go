@@ -125,14 +125,9 @@ func sendBundleResult(chatID int64, res *processResult) {
     for _, r := range res.Raw {
         lines = append(lines, "", "─────── RAW ───────", r)
     }
-    content := strings.Join(lines, "\n")
     summary := fmt.Sprintf("✅ %d کانفیگ • %d بلوک خام\n🤖 نسخه %s", len(res.URIs), len(res.Raw), botVersion)
-    if len(content) > msgLimit {
-        reply(chatID, summary)
-        sendDocument(chatID, "configs.txt", []byte(content))
-    } else {
-        reply(chatID, summary+"\n\n"+content)
-    }
+    reply(chatID, summary)
+    replyLines(chatID, lines)
 }
 
 // ─────────────── ابزارهای مشترک ───────────────
