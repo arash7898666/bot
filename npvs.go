@@ -64,22 +64,22 @@ func startPassReaper() {
     }()
 }
 
-// ═══════════════════ Regex extraction (فیکس اصلی) ═══════════════════
+// ═══════════════════ Regex — هر دو حالت: با/بدون escape ═══════════════════
 
 var (
-    reAddress  = regexp.MustCompile(`"address"\s*:\s*"([^"]+)"`)
-    rePort     = regexp.MustCompile(`"port"\s*:\s*(\d+)`)
-    rePassword = regexp.MustCompile(`"password"\s*:\s*"([^"]*)"`)
-    reProtocol = regexp.MustCompile(`"protocol"\s*:\s*"(trojan|vless|vmess|shadowsocks)"`)
-    reNetwork  = regexp.MustCompile(`"network"\s*:\s*"([^"]*)"`)
-    reWSSHost  = regexp.MustCompile(`"host"\s*:\s*"([^"]*)"`)
-    reWSPath   = regexp.MustCompile(`"path"\s*:\s*"([^"]*)"`)
-    reSecurity = regexp.MustCompile(`"security"\s*:\s*"([^"]*)"`)
-    reSNI      = regexp.MustCompile(`"serverName"\s*:\s*"([^"]*)"`)
-    reFinger   = regexp.MustCompile(`"fingerprint"\s*:\s*"([^"]*)"`)
-    reRemarks  = regexp.MustCompile(`"remarks"\s*:\s*"([^"]*)"`)
-    reUUID     = regexp.MustCompile(`"id"\s*:\s*"([^"]+)"`)
-    reMethod   = regexp.MustCompile(`"method"\s*:\s*"([^"]+)"`)
+    reAddress  = regexp.MustCompile(`\\?"address\\?"\s*:\s*\\?"([^"\\]+)\\?"`)
+    rePort     = regexp.MustCompile(`\\?"port\\?"\s*:\s*(\d+)`)
+    rePassword = regexp.MustCompile(`\\?"password\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reProtocol = regexp.MustCompile(`\\?"protocol\\?"\s*:\s*\\?"(trojan|vless|vmess|shadowsocks)\\?"`)
+    reNetwork  = regexp.MustCompile(`\\?"network\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reWSSHost  = regexp.MustCompile(`\\?"host\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reWSPath   = regexp.MustCompile(`\\?"path\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reSecurity = regexp.MustCompile(`\\?"security\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reSNI      = regexp.MustCompile(`\\?"serverName\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reFinger   = regexp.MustCompile(`\\?"fingerprint\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reRemarks  = regexp.MustCompile(`\\?"remarks\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
+    reUUID     = regexp.MustCompile(`\\?"id\\?"\s*:\s*\\?"([^"\\]+)\\?"`)
+    reMethod   = regexp.MustCompile(`\\?"method\\?"\s*:\s*\\?"([^"\\]*)\\?"`)
 )
 
 func firstGroup(re *regexp.Regexp, s string) string {
@@ -90,12 +90,10 @@ func firstGroup(re *regexp.Regexp, s string) string {
     return ""
 }
 
-// regexExtractFromText — استخراج کانفیگ‌ها بدون پارس JSON
-// مستقیم از متن، الگوهای سرور رو پیدا می‌کنه
+// regexExtractFromText — استخراج مستقیم کانفیگ‌ها از متن (بدون پارس JSON)
 func regexExtractFromText(text string) []string {
     var uris []string
 
-    // پیدا کردن همه‌ی پروتکل‌ها
     protoIdxs := reProtocol.FindAllStringSubmatchIndex(text, -1)
     if len(protoIdxs) == 0 {
         return nil
@@ -103,7 +101,6 @@ func regexExtractFromText(text string) []string {
 
     for _, pm := range protoIdxs {
         proto := text[pm[2]:pm[3]]
-        // پنجره‌ی جست‌وجو: ۳۰۰۰ کاراکتر بعد از پروتکل
         windowEnd := pm[1] + 3000
         if windowEnd > len(text) {
             windowEnd = len(text)
@@ -112,18 +109,15 @@ func regexExtractFromText(text string) []string {
 
         switch proto {
         case "trojan":
-            uri := buildTrojanFromRegex(window, text)
-            if uri != "" {
+            if uri := buildTrojanFromRegex(window, text); uri != "" {
                 uris = append(uris, uri)
             }
         case "vless":
-            uri := buildVlessFromRegex(window, text)
-            if uri != "" {
+            if uri := buildVlessFromRegex(window, text); uri != "" {
                 uris = append(uris, uri)
             }
         case "shadowsocks":
-            uri := buildSSFromRegex(window, text)
-            if uri != "" {
+            if uri := buildSSFromRegex(window, text); uri != "" {
                 uris = append(uris, uri)
             }
         }
@@ -166,7 +160,6 @@ func buildTrojanFromRegex(window, fullText string) string {
         }
     }
 
-    // remarks از کل متن (نزدیک‌ترین به این window)
     remarks := firstGroup(reRemarks, window)
     if remarks == "" {
         remarks = firstGroup(reRemarks, fullText)
@@ -256,11 +249,11 @@ type npvsAppKeyWrap struct {
 }
 
 type npvsHeader struct {
-    V        int    `json:"v"`
-    ConfigID string `json:"configId"`
+    V          int                 `json:"v"`
+    ConfigID   string              `json:"configId"`
     Passphrase *npvsPassphraseWrap `json:"passphrase"`
     AppKey     *npvsAppKeyWrap     `json:"appKey"`
-    Policy struct {
+    Policy     struct {
         DisplayMessage      string  `json:"displayMessage"`
         CustomServerMessage string  `json:"customServerMessage"`
         ExpiresAt           *string `json:"expiresAt"`
@@ -276,6 +269,7 @@ type npvsEnvelope struct {
 }
 
 func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
+    // مسیر باینری: NPVS + ver(1) + hdrLen(4BE) + JSON + nonce(12) + bodyLen(4BE) + body
     if len(b) >= 89 && bytes.HasPrefix(b, []byte("NPVS")) && b[4] <= 1 {
         hdrLen := int(binary.BigEndian.Uint32(b[5:9]))
         if hdrLen > 2 && 9+hdrLen < len(b) {
@@ -299,19 +293,36 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         }
     }
 
+    // مسیر متنی (fallback)
     if bytes.HasPrefix(b, []byte("NPVS")) {
         start := bytes.IndexByte(b, '{')
         if start > 4 {
             depth, inStr, esc, end := 0, false, false, -1
             for i := start; i < len(b); i++ {
                 c := b[i]
-                if esc { esc = false; continue }
-                if c == '\\' { esc = true; continue }
-                if c == '"' { inStr = !inStr; continue }
-                if inStr { continue }
-                if c == '{' { depth++ } else if c == '}' {
+                if esc {
+                    esc = false
+                    continue
+                }
+                if c == '\\' {
+                    esc = true
+                    continue
+                }
+                if c == '"' {
+                    inStr = !inStr
+                    continue
+                }
+                if inStr {
+                    continue
+                }
+                if c == '{' {
+                    depth++
+                } else if c == '}' {
                     depth--
-                    if depth == 0 { end = i; break }
+                    if depth == 0 {
+                        end = i
+                        break
+                    }
                 }
             }
             if end > start {
@@ -352,7 +363,6 @@ func npvsB64URL(s string) ([]byte, error) {
 
 const (
     wbTlastSize = 4096
-    wbTableSize = 16384
     wbXorSize   = 24576
 )
 
@@ -378,7 +388,9 @@ var npvsRepoBases = []string{
 
 func npvsGetBlob(name string, want int) []byte {
     for _, p := range []string{os.Getenv("NPVS_DIR"), "npvs", "assets/npvs", "."} {
-        if p == "" { continue }
+        if p == "" {
+            continue
+        }
         if b, err := os.ReadFile(p + "/" + name); err == nil && len(b) == want {
             return b
         }
@@ -399,6 +411,7 @@ func npvsGetBlob(name string, want int) []byte {
 
 func loadWB() {
     wbOnce.Do(func() {
+        // جداول مشترک از tables.txt (همان NPVT)
         wbTy = tyBoxes
         wbMbl = mbl
         wbXorBin = make([]byte, wbXorSize)
@@ -409,6 +422,8 @@ func loadWB() {
                 }
             }
         }
+
+        // نسخه‌های tboxes_last
         base := tboxesLast
         wbTlastVariants = append(wbTlastVariants, &base)
         for _, name := range []string{"tboxes_last.bin", "tboxes_last_v2.bin"} {
@@ -479,13 +494,17 @@ func wbCTR(nonce, ct []byte, tlast *[16][256]byte) []byte {
     for i := 0; i < len(ct); i += 16 {
         ks := wbBlock(&counter, tlast)
         n := len(ct) - i
-        if n > 16 { n = 16 }
+        if n > 16 {
+            n = 16
+        }
         for j := 0; j < n; j++ {
             out[i+j] = ct[i+j] ^ ks[j]
         }
         for p := 15; p >= 0; p-- {
             counter[p]++
-            if counter[p] != 0 { break }
+            if counter[p] != 0 {
+                break
+            }
         }
     }
     return out
@@ -589,7 +608,7 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
             }
         }
     }
-    return nil, fmt.Errorf("بدنه باز نشد — فایل را آپلود کنید")
+    return nil, fmt.Errorf("بدنه باز نشد — فایل را «آپلود» کنید نه متن")
 }
 
 // ═══════════════════ نقطه ورود ═══════════════════
@@ -600,6 +619,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, err, false
     }
 
+    // ۱) رمز دلخواه → بپرس
     if env.hdr.Passphrase != nil {
         setPendingPass(chatID, "npvs", data)
         if env.hdr.Policy.DisplayMessage != "" {
@@ -610,15 +630,14 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
+    // ۲) appKey → باز کردن با White-Box
     if env.hdr.AppKey != nil {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
-            pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
-            if berr == nil {
-                // ✅ استخراج با Regex — JSON parsing لازم نیست
-                uris := regexExtractFromText(string(pt))
-                res.URIs = uris
-                if len(uris) == 0 {
+            if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
+                // ✅ استخراج با Regex
+                res.URIs = regexExtractFromText(string(pt))
+                if len(res.URIs) == 0 {
                     res.Raw = append(res.Raw, string(pt))
                 }
                 return res, nil, false
@@ -626,15 +645,19 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         }
     }
 
+    // ۳) نمایش وضعیت
     var sb strings.Builder
     sb.WriteString("═══ NPVS ═══\n")
     sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
+    if env.hdr.Policy.DisplayMessage != "" {
+        sb.WriteString("💬 " + env.hdr.Policy.DisplayMessage + "\n")
+    }
     if env.hdr.AppKey != nil {
-        sb.WriteString("⚠️ قفل appKey: باز نشد")
+        sb.WriteString("⚠️ قفل appKey باز نشد")
     } else if len(env.hdr.Recipients) > 0 {
-        sb.WriteString("🔒 E2E — فقط با کلید خصوصی گیرنده")
+        sb.WriteString("🔒 E2E — فقط با کلید خصوصی گیرنده باز می‌شود")
     } else {
-        sb.WriteString("📡 شناسه ارجاع")
+        sb.WriteString("📡 این فایل فقط شناسه ارجاع است")
     }
     res.Raw = append(res.Raw, sb.String())
     return res, nil, false
@@ -646,15 +669,24 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
     if env.hdr.Passphrase == nil {
-        return nil, fmt.Errorf("رمز ندارد")
+        return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
-    attempts := []string{password, strings.TrimSpace(password), strings.Join(strings.Fields(password), "")}
+    // نسخه‌های مختلف رمز
+    attempts := []string{
+        password,
+        strings.TrimSpace(password),
+        strings.Join(strings.Fields(password), ""),
+        strings.ToUpper(strings.Join(strings.Fields(password), "")),
+        strings.ToLower(strings.Join(strings.Fields(password), "")),
+    }
     seen := map[string]bool{}
     var dek []byte
 
     for _, pwd := range attempts {
-        if pwd == "" || seen[pwd] { continue }
+        if pwd == "" || seen[pwd] {
+            continue
+        }
         seen[pwd] = true
         if d, uerr := npvsUnwrapPassphrase(env.hdr.Passphrase, pwd); uerr == nil {
             dek = d
@@ -662,7 +694,7 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         }
     }
     if dek == nil {
-        return nil, fmt.Errorf("رمز اشتباه")
+        return nil, fmt.Errorf("رمز اشتباه — همان رمزی که سازنده اعلام کرده را بفرستید")
     }
 
     pt, err := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
@@ -670,7 +702,7 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
 
-    // ✅ استخراج با Regex — بدون پارس JSON
+    // ✅ استخراج با Regex — بدون نیاز به پارس JSON
     res := &processResult{}
     res.URIs = regexExtractFromText(string(pt))
     if len(res.URIs) == 0 {
