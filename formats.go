@@ -19,7 +19,6 @@ import (
     "regexp"
     "strings"
     "sync"
-    "time"
     "unicode/utf16"
 
     "github.com/vmihailenco/msgpack/v5"
