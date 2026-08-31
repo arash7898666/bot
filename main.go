@@ -24,8 +24,9 @@ import (
 const botVersion = "7.4-NPVS-LINKS"
 
 const (
-    msgLimit  = 3900
-    maxChunks = 40 // تا ۴۰ پیام — عملاً همه خروجی‌ها به‌صورت پیام می‌آیند نه فایل
+    msgLimit    = 3900
+    maxChunks   = 40
+    procTimeout = 120 * time.Second
 )
 
 var (
@@ -501,9 +502,8 @@ func handleMessage(msg *tgbotapi.Message) {
     reply(chatID, summary)
     replyLines(chatID, lines)
 
-    // اگر RAW خیلی بزرگ بود (> ۲۰ پیام)، فقط آن بخش فایل می‌شود تا اسپم نشود
-    total := len(res.Raw)
-    if total > 0 {
+    // اگر RAW خیلی بزرگ بود، فقط همان بخش فایل می‌شود
+    if len(res.Raw) > 0 {
         rawOnly := strings.Join(res.Raw, "\n\n")
         if len(rawOnly) > maxChunks*msgLimit {
             sendAction(chatID, tgbotapi.ChatUploadDocument)
@@ -1241,7 +1241,6 @@ func ctrIncrement(counter *[16]byte) {
 // ═══════════════════ پیمایش JSON ═══════════════════
 
 // cleanEmbeddedJSON: رشته‌ی JSON چندخطی را برای پارس آماده می‌کند
-// خطوط جدید واقعی و escape شده (\n) + تب‌ها حذف می‌شوند
 func cleanEmbeddedJSON(c string) []byte {
     c = strings.ReplaceAll(c, "\\n", "")
     c = strings.ReplaceAll(c, "\\r", "")
