@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.6-NPVS-FIX3"
+const botVersion = "7.7-NPVS-FIX4"
 
 const (
     msgLimit    = 3900
@@ -199,7 +199,7 @@ func releaseUser(chatID int64) {
     }
 }
 
-// ═══════════════════ منوی دستورات (☰) ═══════════════════
+// ═══════════════════ منوی دستورات ═══════════════════
 
 func setBotCommands() {
     publicCmds := []tgbotapi.BotCommand{
@@ -828,13 +828,9 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    // فیکس NPVS: حذف خطوط جدید خام و تب که پارسر را می‌شکنند
-    parseable := pt
-    if bytes.ContainsAny(parseable, "\n\r\t") {
-        parseable = bytes.ReplaceAll(parseable, []byte("\n"), nil)
-        parseable = bytes.ReplaceAll(parseable, []byte("\r"), nil)
-        parseable = bytes.ReplaceAll(parseable, []byte("\t"), nil)
-    }
+    // فیکس NPVS: حذف خطوط خام و تب (خارج از رشته‌ها امن نیست،
+    // اما فایل‌های NPVS فاصله‌های معنادار بیرون رشته‌ها ندارند)
+    parseable := normalizeJSONForParse(pt)
 
     var root any
     if err := json.Unmarshal(parseable, &root); err == nil {
@@ -885,6 +881,84 @@ func consumeJSONBlob(pt []byte, res *processResult) {
     if s := strings.TrimSpace(string(pt)); s != "" {
         res.Raw = append(res.Raw, s)
     }
+}
+
+// normalizeJSONForParse: خطوط جدید خام و تب را فقط بیرون از رشته‌ها حذف می‌کند
+// (وضعیت رشته را با شمارش escape دنبال می‌کند — داخل رشته دست نمی‌زند)
+func normalizeJSONForParse(data []byte) []byte {
+    if !bytes.ContainsAny(data, "\n\r\t") {
+        return data
+    }
+
+    var out bytes.Buffer
+    inString := false
+    escaped := false
+    for _, b := range data {
+        if escaped {
+            escaped = false
+            out.WriteByte(b)
+            continue
+        }
+        if inString {
+            if b == '\\' {
+                escaped = true
+            } else if b == '"' {
+                inString = false
+            }
+            out.WriteByte(b)
+            continue
+        }
+        switch b {
+        case '"':
+            inString = true
+            out.WriteByte(b)
+        case '\n', '\r', '\t', ' ':
+            // بیرون رشته — نادیده گرفته می‌شود
+        default:
+            out.WriteByte(b)
+        }
+    }
+    return out.Bytes()
+}
+
+// splitJSONObjects — ✅ فیکس شد: شمارش براکت صحیح
+func splitJSONObjects(data []byte) [][]byte {
+    var objects [][]byte
+    depth := 0
+    start := -1
+    inString := false
+    escaped := false
+    for i, b := range data {
+        if escaped {
+            escaped = false
+            continue
+        }
+        if b == '\\' {
+            escaped = true
+            continue
+        }
+        if b == '"' {
+            inString = !inString
+            continue
+        }
+        if inString {
+            continue
+        }
+        switch b {
+        case '{':
+            if depth == 0 {
+                start = i
+            }
+            depth++
+        case '}':
+            depth--
+            if depth == 0 && start >= 0 {
+                objects = append(objects, data[start:i+1])
+                start = -1
+            }
+        }
+    }
+    return objects
 }
 
 func isNoiseJSON(root any) bool {
@@ -998,45 +1072,6 @@ func trimNonPrintable(b []byte) []byte {
         end--
     }
     return b[start:end]
-}
-
-func splitJSONObjects(data []byte) [][]byte {
-    var objects [][]byte
-    depth := 0
-    start := -1
-    inString := false
-    escaped := false
-    for _, b := range data {
-        if escaped {
-            escaped = false
-            continue
-        }
-        if b == '\\' {
-            escaped = true
-            continue
-        }
-        if b == '"' {
-            inString = !inString
-            continue
-        }
-        if inString {
-            continue
-        }
-        switch b {
-        case '{':
-            if depth == 0 {
-                start = -1
-            }
-            depth++
-        case '}':
-            depth--
-            if depth == 0 && start >= 0 {
-                objects = append(objects, data[start:])
-                start = -1
-            }
-        }
-    }
-    return objects
 }
 
 var uriSchemes = []string{
@@ -1191,32 +1226,86 @@ func ctrIncrement(counter *[16]byte) {
 
 // ═══════════════════ پیمایش JSON ═══════════════════
 
+// cleanEmbeddedJSON — ✅ فیکس کامل: هر ۴ حالت
+// ۱) JSON خام معتبر → همان
+// ۲) چندخطی خام → خطوط حذف (بیرون رشته)
+// ۳) escape شده با \n متنی → حذف
+// ۴) دوبل-escape (رشته JSON داخل رشته) → unmarshal دوم
 func cleanEmbeddedJSON(c string) []byte {
-    c = strings.ReplaceAll(c, "\\n", "")
-    c = strings.ReplaceAll(c, "\\r", "")
-    c = strings.ReplaceAll(c, "\\t", "")
-    c = strings.Map(func(r rune) rune {
-        if r == '\n' || r == '\r' || r == '\t' {
-            return -1
+    trimmed := strings.TrimSpace(c)
+    if trimmed == "" {
+        return []byte("{}")
+    }
+
+    // حالت ۱: از قبل معتبر
+    if json.Valid([]byte(trimmed)) {
+        return []byte(trimmed)
+    }
+
+    // حالت ۲: چندخطی خام — حذف فاصله‌ها فقط بیرون از رشته‌ها
+    if normalized := normalizeJSONForParse([]byte(trimmed)); json.Valid(normalized) {
+        return normalized
+    }
+
+    // حالت ۳: escape متنی \n
+    c3 := strings.ReplaceAll(trimmed, "\\n", "")
+    c3 = strings.ReplaceAll(c3, "\\r", "")
+    c3 = strings.ReplaceAll(c3, "\\t", "")
+    if json.Valid([]byte(c3)) {
+        return []byte(c3)
+    }
+
+    // حالت ۴: دوبل-escape — خودش یک رشته‌ی JSON است
+    var inner string
+    if err := json.Unmarshal([]byte(`"`+strings.ReplaceAll(trimmed, `"`, `\"`)+`"`), &inner); err == nil {
+        if json.Valid([]byte(inner)) {
+            return []byte(inner)
         }
-        return r
-    }, c)
-    return []byte(strings.TrimSpace(c))
+        // inner چندخطی باشد
+        if normalized := normalizeJSONForParse([]byte(inner)); json.Valid(normalized) {
+            return normalized
+        }
+    }
+
+    // حالت ۵: ترکیبی — همه فاصله‌ها
+    c5 := normalizeJSONForParse([]byte(trimmed))
+    c5s := strings.ReplaceAll(string(c5), "\\n", "")
+    if json.Valid([]byte(c5s)) {
+        return []byte(c5s)
+    }
+
+    return []byte(c3)
 }
 
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
         if raw, ok := x["v2rayJson"]; ok {
-            if c, ok := raw.(string); ok && c != "" {
-                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+            switch c := raw.(type) {
+            case string:
+                if c != "" {
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+                        *uris = append(*uris, u...)
+                    }
+                }
+            case map[string]any:
+                b, _ := json.Marshal(c)
+                if u, err := extractURIsFromConfig(b); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
         }
         if raw, ok := x["v2rRawJson"]; ok {
-            if c, ok := raw.(string); ok && c != "" {
-                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+            switch c := raw.(type) {
+            case string:
+                if c != "" {
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+                        *uris = append(*uris, u...)
+                    }
+                }
+            case map[string]any:
+                b, _ := json.Marshal(c)
+                if u, err := extractURIsFromConfig(b); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
@@ -1667,7 +1756,7 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
-// ═══ فیکس اصلی ۷.۶: پردازش v2rayJson حتی وقتی Server خالی است ═══
+// ═══ فیکس ۷.۶/۷.۷: v2rayJson بدون Server هم پردازش شود ═══
 
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
