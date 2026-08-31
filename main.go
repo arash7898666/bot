@@ -340,7 +340,7 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
-    // ─── فایل رمزدار در انتظار (SlipNet / NPVS) ───
+    // ─── فایل رمزدار در انتظار ───
     if strings.TrimSpace(msg.Text) != "" {
         if kind, fd, found, expired := takePendingPass(chatID); found || expired {
             if expired {
@@ -820,7 +820,7 @@ func tryNPVT(text string) *processResult {
     return res
 }
 
-// ═══════════════════ مصرف JSON ═══════════════════
+// ═══════════════════ مصرف JSON (با fallback Regex) ═══════════════════
 
 func consumeJSONBlob(pt []byte, res *processResult) {
     pt = trimNonPrintable(pt)
@@ -842,7 +842,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
             res.URIs = append(res.URIs, uris...)
             return
         }
-        // fallback: Regex هم امتحان کن
+        // fallback: Regex
         if uris := regexExtractFromText(string(pt)); len(uris) > 0 {
             res.URIs = append(res.URIs, uris...)
             return
@@ -892,7 +892,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
     }
 }
 
-// normalizeJSONForParse: حذف فاصله‌ها فقط بیرون از رشته‌ها
 func normalizeJSONForParse(data []byte) []byte {
     if !bytes.ContainsAny(data, "\n\r\t") {
         return data
@@ -1239,17 +1238,14 @@ func cleanEmbeddedJSON(c string) []byte {
         return []byte("{}")
     }
 
-    // حالت ۱: از قبل معتبر
     if json.Valid([]byte(trimmed)) {
         return []byte(trimmed)
     }
 
-    // حالت ۲: چندخطی خام — حذف فاصله‌ها بیرون از رشته‌ها
     if normalized := normalizeJSONForParse([]byte(trimmed)); json.Valid(normalized) {
         return normalized
     }
 
-    // حالت ۳: escape متنی \n
     c3 := strings.ReplaceAll(trimmed, "\\n", "")
     c3 = strings.ReplaceAll(c3, "\\r", "")
     c3 = strings.ReplaceAll(c3, "\\t", "")
@@ -1257,7 +1253,6 @@ func cleanEmbeddedJSON(c string) []byte {
         return []byte(c3)
     }
 
-    // حالت ۴: دوبل-escape — خودش یک رشته‌ی JSON است
     var inner string
     if err := json.Unmarshal([]byte(`"`+strings.ReplaceAll(trimmed, `"`, `\"`)+`"`), &inner); err == nil {
         if json.Valid([]byte(inner)) {
@@ -1275,31 +1270,15 @@ func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
         if raw, ok := x["v2rayJson"]; ok {
-            switch c := raw.(type) {
-            case string:
-                if c != "" {
-                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
-                        *uris = append(*uris, u...)
-                    }
-                }
-            case map[string]any:
-                b, _ := json.Marshal(c)
-                if u, err := extractURIsFromConfig(b); err == nil {
+            if c, ok := raw.(string); ok && c != "" {
+                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
         }
         if raw, ok := x["v2rRawJson"]; ok {
-            switch c := raw.(type) {
-            case string:
-                if c != "" {
-                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
-                        *uris = append(*uris, u...)
-                    }
-                }
-            case map[string]any:
-                b, _ := json.Marshal(c)
-                if u, err := extractURIsFromConfig(b); err == nil {
+            if c, ok := raw.(string); ok && c != "" {
+                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
