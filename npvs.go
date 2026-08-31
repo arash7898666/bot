@@ -20,7 +20,7 @@ import (
 )
 
 const npvsWrapSize = 60
-const npvsEngine = "NPVS Engine v2"
+const npvsEngine = "NPVS Engine v3"
 
 // ═══════════════════ رمزهای در انتظار ═══════════════════
 
@@ -65,14 +65,58 @@ func startPassReaper() {
     }()
 }
 
-// ═══════════════════ Regex — مقاوم به هر تعداد escape ═══════════════════
-// (?:\\*) = صفر یا چند بک‌اسلش — هم "field" هم \"field\" هم \\"field\\" را می‌گیرد
+// ═══════════════════ Sentinel ها (npvs1:...) — فیکس اصلی ═══════════════════
+
+const npvSentinelPrefix = "npvs1:"
+const npvSentinelAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-"
+
+func decodeSentinelToken(tok string) ([]byte, bool) {
+    if dec, err := base64.StdEncoding.DecodeString(tok); err == nil {
+        return dec, true
+    }
+    if dec, err := base64.URLEncoding.DecodeString(tok); err == nil {
+        return dec, true
+    }
+    if m := len(tok) % 4; m != 0 {
+        if dec, err := base64.URLEncoding.DecodeString(tok + strings.Repeat("=", 4-m)); err == nil {
+            return dec, true
+        }
+    }
+    return nil, false
+}
+
+func decodeNpvSentinels(s string) string {
+    var sb strings.Builder
+    for {
+        i := strings.Index(s, npvSentinelPrefix)
+        if i < 0 {
+            sb.WriteString(s)
+            return sb.String()
+        }
+        sb.WriteString(s[:i])
+        s = s[i+len(npvSentinelPrefix):]
+        j := 0
+        for j < len(s) && strings.IndexByte(npvSentinelAlphabet, s[j]) >= 0 {
+            j++
+        }
+        tok := s[:j]
+        s = s[j:]
+        if dec, ok := decodeSentinelToken(tok); ok {
+            sb.Write(dec)
+        } else {
+            sb.WriteString(npvSentinelPrefix)
+            sb.WriteString(tok)
+        }
+    }
+}
+
+// ═══════════════════ Regex — هر دو حالت escape/ساده ═══════════════════
 
 var (
     reProtocol  = regexp.MustCompile(`(?:\\*)"protocol(?:\\*)"\s*:\s*(?:\\*)"(trojan|vless|vmess|shadowsocks)(?:\\*)"`)
     reAddress   = regexp.MustCompile(`(?:\\*)"address(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
     reServer    = regexp.MustCompile(`(?:\\*)"server(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
-    reServerPort = regexp.MustCompile(`(?:\\*)"serverPort(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
+    reServerPort = regexp.MustCompile(`(?:\\*)"serverPort(?:\\*)"\s*:\s*(?:\\*)"?([^"\\,}\]]+)(?:\\*)"?`)
     rePort      = regexp.MustCompile(`(?:\\*)"port(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
     rePassword  = regexp.MustCompile(`(?:\\*)"password(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
     reMethod    = regexp.MustCompile(`(?:\\*)"method(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
@@ -111,7 +155,7 @@ func normalizeAddr(addr, port string) (string, string) {
     return addr, port
 }
 
-// ═══════════════════ 🔧 دیباگ — خودش می‌گوید مشکل کجاست ═══════════════════
+// ═══════════════════ 🔧 دیباگ ═══════════════════
 
 func debugPreview(s string, n int) string {
     if len(s) > n {
@@ -127,45 +171,22 @@ func debugPreview(s string, n int) string {
 func npvsDebugInfo(pt []byte) string {
     lower := strings.ToLower(string(pt))
     var sb strings.Builder
-    sb.WriteString("🔧 " + npvsEngine + " — حالت دیباگ\n")
-    sb.WriteString("ℹ️ لینک ساخته نشد — علت را بررسی کنید:\n\n")
-    sb.WriteString(fmt.Sprintf("📊 حجم متن رمزگشایی‌شده: %d بایت\n", len(pt)))
-    sb.WriteString("🔍 تعداد علامت‌ها در متن:\n")
+    sb.WriteString("🔧 " + npvsEngine + " — دیباگ\n")
+    sb.WriteString("ℹ️ لینک ساخته نشد:\n\n")
+    sb.WriteString(fmt.Sprintf("📊 حجم متن: %d بایت\n", len(pt)))
+    sb.WriteString("🔍 علامت‌ها:\n")
     fmt.Fprintf(&sb, "   protocol=%d | trojan=%d | vless=%d | vmess=%d\n",
         strings.Count(lower, "protocol"), strings.Count(lower, "trojan"),
         strings.Count(lower, "vless"), strings.Count(lower, "vmess"))
-    fmt.Fprintf(&sb, "   server=%d | password=%d | method=%d\n",
+    fmt.Fprintf(&sb, "   server=%d | password=%d | method=%d | npvs1=%d\n",
         strings.Count(lower, "server"), strings.Count(lower, "password"),
-        strings.Count(lower, "method"))
-    fmt.Fprintf(&sb, "   v2rayjson=%d | configtype=%d | outbounds=%d\n",
-        strings.Count(lower, "v2rayjson"), strings.Count(lower, "configtype"),
-        strings.Count(lower, "outbounds"))
-    sb.WriteString("\n📝 ۴۰۰ کاراکتر اول (⇧ = بک‌اسلش، ⏎ = خط جدید):\n")
+        strings.Count(lower, "method"), strings.Count(lower, "npvs1:"))
+    sb.WriteString("\n📝 ۴۰۰ کاراکتر اول:\n")
     sb.WriteString(debugPreview(string(pt), 400))
     return sb.String()
 }
 
-// ═══════════════════ مسیر ۱: استخراج با protocol ═══════════════════
-
-func regexExtractFromText(text string) []string {
-    uris := extractByProtocol(text)
-    profileUris := extractByProfile(text)
-
-    // فقط لینک‌های پروفایلی که تکراری نیستند
-    for _, pu := range profileUris {
-        dup := false
-        for _, u := range uris {
-            if uriKey(u) == uriKey(pu) {
-                dup = true
-                break
-            }
-        }
-        if !dup {
-            uris = append(uris, pu)
-        }
-    }
-    return dedupeByURI(uris)
-}
+// ═══════════════════ استخراج ═══════════════════
 
 func uriKey(u string) string {
     i := strings.Index(u, "://")
@@ -191,6 +212,25 @@ func dedupeByURI(in []string) []string {
         out = append(out, u)
     }
     return out
+}
+
+func regexExtractFromText(text string) []string {
+    uris := extractByProtocol(text)
+    profileUris := extractByProfile(text)
+
+    for _, pu := range profileUris {
+        dup := false
+        for _, u := range uris {
+            if uriKey(u) == uriKey(pu) {
+                dup = true
+                break
+            }
+        }
+        if !dup {
+            uris = append(uris, pu)
+        }
+    }
+    return dedupeByURI(uris)
 }
 
 func extractByProtocol(text string) []string {
@@ -225,9 +265,6 @@ func extractByProtocol(text string) []string {
     return uris
 }
 
-// ═══════════════════ مسیر ۲: استخراج از پروفایل (بدون protocol) ═══════════════════
-// برای کانفیگ‌هایی که password/method مستقیم در v2rayProfile هستند
-
 func extractByProfile(text string) []string {
     var uris []string
     serverIdxs := reServer.FindAllStringSubmatchIndex(text, -1)
@@ -245,7 +282,7 @@ func extractByProfile(text string) []string {
         }
         pwd := firstGroup(rePassword, window)
         if pwd == "" {
-            continue // بدون رمز — قابل استفاده نیست
+            continue
         }
         method := firstGroup(reMethod, window)
         remarks := firstGroup(reRemarks, window)
@@ -752,6 +789,9 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
     if password == "" {
         return nil, fmt.Errorf("رمز لازم است")
     }
+    if p.Iters < 1 || p.Iters > 10000000 {
+        return nil, fmt.Errorf("تکرار نامعتبر: %d", p.Iters)
+    }
     salt, err := npvsB64URL(p.Salt)
     if err != nil || len(salt) < 16 {
         return nil, fmt.Errorf("salt نامعتبر")
@@ -815,6 +855,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, err, false
     }
 
+    // ۱) رمز دلخواه → بپرس
     if env.hdr.Passphrase != nil {
         setPendingPass(chatID, "npvs", data)
         if env.hdr.Policy.DisplayMessage != "" {
@@ -825,21 +866,24 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
+    // ۲) appKey → باز کردن با White-Box
     if env.hdr.AppKey != nil {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
             if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
-                res.URIs = regexExtractFromText(string(pt))
+                // ✅ فیکس اصلی: اول Sentinel ها decode می‌شوند، بعد استخراج
+                decoded := decodeNpvSentinels(string(pt))
+                res.URIs = regexExtractFromText(decoded)
                 if len(res.URIs) > 0 {
                     return res, nil, false
                 }
-                // 🔧 لینک ساخته نشد → حالت دیباگ
-                res.Raw = append(res.Raw, npvsDebugInfo(pt))
+                res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
                 return res, nil, false
             }
         }
     }
 
+    // ۳) نمایش وضعیت
     var sb strings.Builder
     sb.WriteString("🔧 " + npvsEngine + "\n")
     sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
@@ -866,6 +910,7 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
+    // نسخه‌های مختلف رمز
     attempts := []string{
         password,
         strings.TrimSpace(password),
@@ -894,11 +939,13 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
 
+    // ✅ فیکس اصلی: اول Sentinel ها decode می‌شوند، بعد استخراج
+    decoded := decodeNpvSentinels(string(pt))
+
     res := &processResult{}
-    res.URIs = regexExtractFromText(string(pt))
+    res.URIs = regexExtractFromText(decoded)
     if len(res.URIs) == 0 {
-        // 🔧 لینک ساخته نشد → حالت دیباگ
-        res.Raw = append(res.Raw, npvsDebugInfo(pt))
+        res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
     }
     return res, nil
 }
