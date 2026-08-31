@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.8-NPVS-REGEX"
+const botVersion = "8.0-SPEED"
 
 const (
     msgLimit    = 3900
@@ -248,6 +248,7 @@ func main() {
     loadState()
     startStatsFlusher()
     startPassReaper()
+    preloadNPVS() // ⚡ جداول NPVS از قبل آماده می‌شوند
 
     var err error
     bot, err = tgbotapi.NewBotAPI(token)
@@ -842,7 +843,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
             res.URIs = append(res.URIs, uris...)
             return
         }
-        // fallback: Regex
         if uris := regexExtractFromText(string(pt)); len(uris) > 0 {
             res.URIs = append(res.URIs, uris...)
             return
@@ -881,7 +881,6 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    // fallback: Regex
     if uris := regexExtractFromText(string(pt)); len(uris) > 0 {
         res.URIs = append(res.URIs, uris...)
         return
