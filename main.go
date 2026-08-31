@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.4-NPVS-LINKS"
+const botVersion = "7.5-NPVS-FIX2"
 
 const (
     msgLimit    = 3900
@@ -162,7 +162,7 @@ func isMemberOf(userID int64, channel string) bool {
         },
     })
     if err != nil {
-        log.Printf("⚠️ بررسی عضویت ناموفق (%s): %v — احتمالاً ربات ادمین کانال نیست", channel, err)
+        log.Printf("⚠️ بررسی عضویت ناموفق (%s): %v", channel, err)
         return false
     }
     switch member.Status {
@@ -382,7 +382,7 @@ func handleMessage(msg *tgbotapi.Message) {
     switch {
     case msg.Document != nil:
         if msg.Document.FileSize > 19*1024*1024 {
-            reply(chatID, "❌ فایل بزرگ‌تر از ۱۹ مگابایت است؛ ربات‌های تلگرام اجازهٔ دانلود ندارند.")
+            reply(chatID, "❌ فایل بزرگ‌تر از ۱۹ مگابایت است.")
             return
         }
         pm := tgbotapi.NewMessage(chatID, "⏳ در حال دانلود و رمزگشایی...")
@@ -425,7 +425,7 @@ func handleMessage(msg *tgbotapi.Message) {
         name = "npvt"
 
     default:
-        reply(chatID, "📎 فایل را بفرستید یا محتوایش را متن کنید. راهنما: /help")
+        reply(chatID, "📎 فایل را بفرستید یا محتوایش را متن کنید. /help")
         return
     }
 
@@ -450,14 +450,14 @@ func handleMessage(msg *tgbotapi.Message) {
     case out = <-done:
     case <-time.After(procTimeout):
         deleteProgress(chatID, progMsgID)
-        reply(chatID, "⏱️ پردازش این فایل بیش از حد طول کشید و متوقف شد.\n\n💡 فایل سبک‌تری بفرستید یا بعداً دوباره تلاش کنید.\n\n🤖 "+botVersion)
+        reply(chatID, "⏱️ پردازش طولانی شد و متوقف گردید.\n\n🤖 "+botVersion)
         return
     }
 
     deleteProgress(chatID, progMsgID)
 
     if out.needPwd {
-        reply(chatID, "🔐 این فایل با رمز محافظت شده است!\n\n🔑 لطفاً رمز (Passphrase) آن را همین حالا به‌صورت یک پیام بفرستید:")
+        reply(chatID, "🔐 این فایل با رمز محافظت شده است!\n\n🔑 لطفاً رمز (Passphrase) را همین حالا بفرستید:")
         return
     }
     if out.err != nil {
@@ -468,14 +468,14 @@ func handleMessage(msg *tgbotapi.Message) {
     res := out.res
     if res == nil || (len(res.URIs) == 0 && len(res.Raw) == 0) {
         if res != nil && len(res.Errors) > 0 {
-            reply(chatID, "⚠️ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n")+"\n\n🤖 "+botVersion)
+            reply(chatID, "⚠️ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n"))
         } else {
             reply(chatID, "⚠️ در این ورودی کانفیگی پیدا نشد.\n\n🤖 "+botVersion)
         }
         return
     }
 
-    // ─── خروجی: همیشه به‌صورت پیام تلگرام (تکه‌تکه) ───
+    // ─── خروجی: همیشه پیام تلگرامی (تکه‌تکه) ───
     var lines []string
     for i, u := range res.URIs {
         if i > 0 {
@@ -491,25 +491,10 @@ func handleMessage(msg *tgbotapi.Message) {
     if len(res.Raw) > 0 {
         summary += fmt.Sprintf(" • %d بلوک خام", len(res.Raw))
     }
-    if len(res.URIs) == 0 && len(res.Raw) > 0 {
-        summary += "\nℹ️ این کانفیگ از نوع SSH/Tunnel است و لینک V2ray ندارد — داده کامل در RAW."
-    }
-    if len(res.Errors) > 0 {
-        summary += fmt.Sprintf("\n⚠️ %d بلوک نادیده", len(res.Errors))
-    }
     summary += "\n🤖 نسخه " + botVersion
 
     reply(chatID, summary)
     replyLines(chatID, lines)
-
-    // اگر RAW خیلی بزرگ بود، فقط همان بخش فایل می‌شود
-    if len(res.Raw) > 0 {
-        rawOnly := strings.Join(res.Raw, "\n\n")
-        if len(rawOnly) > maxChunks*msgLimit {
-            sendAction(chatID, tgbotapi.ChatUploadDocument)
-            _ = sendDocument(chatID, name+"_raw.txt", []byte(rawOnly))
-        }
-    }
 }
 
 func deleteProgress(chatID int64, msgID int) {
@@ -530,7 +515,7 @@ func sendJoinPrompt(chatID int64, channel string) {
     )
     m := tgbotapi.NewMessage(chatID, fmt.Sprintf(
         "🔒 برای استفاده از ربات ابتدا در کانال عضو شوید:\n\n%s\n\n"+
-            "بعد از عضویت، دوباره پیام یا فایل خود را بفرستید. 👇", channel))
+            "بعد از عضویت، دوباره بفرستید. 👇", channel))
     m.ReplyMarkup = keyboard
     m.DisableWebPagePreview = true
     if _, err := bot.Send(m); err != nil {
@@ -557,8 +542,7 @@ func handleSetChannel(msg *tgbotapi.Message, chatID int64) {
     settingsMu.Unlock()
     saveSettings()
     reply(chatID, "✅ جوین اجباری فعال شد روی "+ch+
-        "\n\n⚠️ مهم: حتماً ربات را در این کانال «ادمین» کنید،"+
-        " وگرنه نمی‌تواند عضویت کاربران را بررسی کند.")
+        "\n\n⚠️ ربات را در کانال «ادمین» کنید.")
 }
 
 func statsText() string {
@@ -566,16 +550,14 @@ func statsText() string {
     users := len(stats.Users)
     processed := stats.Processed
     statsMu.Unlock()
-    return fmt.Sprintf("📊 آمار ربات:\n\n👥 کاربران: %d\n"+
-        "📦 پردازش‌ها: %d\n"+
-        "📢 کانال اجباری: %s\n"+
-        "🤖 نسخه: %s", users, processed, channelStatus(), botVersion)
+    return fmt.Sprintf("📊 آمار:\n\n👥 کاربران: %d\n📦 پردازش‌ها: %d\n📢 کانال: %s\n🤖 نسخه: %s",
+        users, processed, channelStatus(), botVersion)
 }
 
 func handleBroadcast(msg *tgbotapi.Message, chatID int64) {
     parts := strings.Fields(msg.Text)
     if len(parts) < 2 {
-        reply(chatID, "استفاده: /broadcast متن پیام")
+        reply(chatID, "استفاده: /broadcast متن")
         return
     }
     text := strings.Join(parts[1:], " ")
@@ -587,7 +569,7 @@ func handleBroadcast(msg *tgbotapi.Message, chatID int64) {
     }
     statsMu.Unlock()
 
-    reply(chatID, fmt.Sprintf("⏳ در حال ارسال به %d کاربر...", len(ids)))
+    reply(chatID, fmt.Sprintf("⏳ ارسال به %d کاربر...", len(ids)))
     sent := 0
     for _, id := range ids {
         m := tgbotapi.NewMessage(id, "📢 "+text)
@@ -597,7 +579,7 @@ func handleBroadcast(msg *tgbotapi.Message, chatID int64) {
         }
         time.Sleep(50 * time.Millisecond)
     }
-    reply(chatID, fmt.Sprintf("✅ پیام به %d کاربر از %d ارسال شد.", sent, len(ids)))
+    reply(chatID, fmt.Sprintf("✅ ارسال به %d از %d", sent, len(ids)))
 }
 
 // ═══════════════════ ابزارهای تلگرام ═══════════════════
@@ -609,7 +591,7 @@ func reply(chatID int64, text string) {
     m := tgbotapi.NewMessage(chatID, text)
     m.DisableWebPagePreview = true
     if _, err := bot.Send(m); err != nil {
-        log.Printf("خطا در ارسال پیام: %v", err)
+        log.Printf("خطا در ارسال: %v", err)
     }
 }
 
@@ -628,12 +610,6 @@ func sendAction(chatID int64, action string) {
     _, _ = bot.Request(tgbotapi.NewChatAction(chatID, action))
 }
 
-func sendDocument(chatID int64, name string, data []byte) error {
-    doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{Name: name, Bytes: data})
-    _, err := bot.Send(doc)
-    return err
-}
-
 func downloadFile(fileID string) ([]byte, error) {
     f, err := bot.GetFile(tgbotapi.FileConfig{FileID: fileID})
     if err != nil {
@@ -645,12 +621,11 @@ func downloadFile(fileID string) ([]byte, error) {
     }
     defer resp.Body.Close()
     if resp.StatusCode != http.StatusOK {
-        return nil, fmt.Errorf("HTTP %d هنگام دانلود", resp.StatusCode)
+        return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
     }
     return io.ReadAll(resp.Body)
 }
 
-// ارسال تکه‌تکه‌ی خطوط — همه خروجی‌ها به‌صورت پیام
 func replyLines(chatID int64, lines []string) {
     var cur []string
     size := 0
@@ -676,34 +651,26 @@ func replyLines(chatID int64, lines []string) {
 }
 
 func helpText() string {
-    return `🔐 <b>ربات رمزگشای کانفیگ</b> — نسخه <code>` + botVersion + `</code>
+    return `🔐 <b>ربات رمزگشای کانفیگ</b> — <code>` + botVersion + `</code>
 
-📤 فایل کانفیگ را بفرستید — فرمت خودکار تشخیص داده می‌شود.
+📤 فایل کانفیگ را بفرستید — فرمت خودکار تشخیص می‌شود.
 
-/formats → لیست کامل فرمت‌ها
-/version → نسخه ربات
+/formats → لیست فرمت‌ها
+/version → نسخه
 /channel → وضعیت کانال`
 }
 
 func formatsText() string {
-    return `📋 <b>فرمت‌های ورودی پشتیبانی‌شده:</b>
+    return `📋 <b>فرمت‌های پشتیبانی‌شده:</b>
 
-<code>.npvt</code> — NapsternetV
-<code>.npvs</code> — NapsternetV نسخه جدید (+ رمزدار)
-<code>.ehi</code> — HTTP Injector
-<code>.hat</code> — HA Tunnel Plus
-<code>.happ</code> — Happ (+ لینک happ://)
-<code>.slip</code> — SlipNet (+ باندل رمزدار)
-<code>.nm</code> — NetMod
-<code>.dark</code> — DarkTunnel
+<code>.npvt</code> <code>.npvs</code> <code>.ehi</code>
+<code>.hat</code> <code>.happ</code> <code>.slip</code>
+<code>.nm</code> <code>.dark</code>
 
-📥 همچنین: JSON مستقیم، base64، ZIP حاوی JSON و لینک‌های خام
-<code>vless / vmess / trojan / ss / hy2 / tuic</code>
-
-💡 کانفیگ‌های SSH/Tunnel فاقد لینک V2ray هستند و داده کاملشان در RAW نمایش داده می‌شود.`
+📥 JSON / base64 / ZIP / لینک‌های خام`
 }
 
-// ═══════════════════ موتور پردازش یونیورسال ═══════════════════
+// ═══════════════════ موتور پردازش ═══════════════════
 
 type processResult struct {
     URIs   []string
@@ -713,7 +680,7 @@ type processResult struct {
 
 func processInput(data []byte) (*processResult, error) {
     if len(data) > 50*1024*1024 {
-        return nil, fmt.Errorf("ورودی بیش از حد بزرگ است")
+        return nil, fmt.Errorf("ورودی بیش از حد بزرگ")
     }
     return processUniversal(data, 0)
 }
@@ -725,7 +692,7 @@ func processUniversal(data []byte, depth int) (*processResult, error) {
 
     text := strings.TrimSpace(string(data))
     if text == "" {
-        return nil, fmt.Errorf("محتوای ورودی خالی است")
+        return nil, fmt.Errorf("محتوای خالی")
     }
 
     if text[0] == '{' || text[0] == '[' {
@@ -760,7 +727,7 @@ func processUniversal(data []byte, depth int) (*processResult, error) {
     if npvtRes != nil && len(npvtRes.Errors) > 0 {
         return nil, fmt.Errorf("رمزگشایی ناموفق:\n%s", strings.Join(npvtRes.Errors, "\n"))
     }
-    return nil, fmt.Errorf("هیچ فرمت شناخته‌شده‌ای در ورودی پیدا نشد")
+    return nil, fmt.Errorf("هیچ فرمت شناخته‌شده‌ای پیدا نشد")
 }
 
 const zipTotalLimit = 100 << 20
@@ -768,7 +735,7 @@ const zipTotalLimit = 100 << 20
 func processZIP(data []byte, depth int) (*processResult, error) {
     zr, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
     if err != nil {
-        return nil, fmt.Errorf("فایل ZIP نامعتبر است: %v", err)
+        return nil, fmt.Errorf("ZIP نامعتبر: %v", err)
     }
     res := &processResult{}
     var total int64
@@ -785,7 +752,7 @@ func processZIP(data []byte, depth int) (*processResult, error) {
 
         total += int64(len(content))
         if total > zipTotalLimit {
-            res.Errors = append(res.Errors, "حجم کل محتویات ZIP بیش از حد مجاز است")
+            res.Errors = append(res.Errors, "حجم ZIP بیش از حد")
             break
         }
 
@@ -793,7 +760,6 @@ func processZIP(data []byte, depth int) (*processResult, error) {
             if sub, err := processZIP(content, depth+1); err == nil {
                 res.URIs = append(res.URIs, sub.URIs...)
                 res.Raw = append(res.Raw, sub.Raw...)
-                res.Errors = append(res.Errors, sub.Errors...)
             }
             continue
         }
@@ -840,27 +806,13 @@ func tryNPVT(text string) *processResult {
         }
         decoded++
         if len(b) < 16 {
-            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: کوتاه‌تر از ۱۶ بایت.", i+1))
             continue
         }
         pt, derr := decrypt(b)
         if derr != nil {
-            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: %v", i+1, derr))
             continue
         }
         if !isMostlyPrintable(pt) {
-            preview := make([]byte, 0, 80)
-            for j, bb := range pt {
-                if j >= 80 {
-                    break
-                }
-                if bb >= 0x20 && bb < 0x7F {
-                    preview = append(preview, bb)
-                } else {
-                    preview = append(preview, '.')
-                }
-            }
-            res.Errors = append(res.Errors, fmt.Sprintf("بلوک %d: خروجی نامعتبر — %s", i+1, string(preview)))
             continue
         }
         consumeJSONBlob(pt, res)
@@ -875,6 +827,8 @@ func tryNPVT(text string) *processResult {
 }
 
 // ═══════════════════ مصرف JSON ═══════════════════
+// 🔧 فیکس اصلی: JSON های NPVS دارای خطوط جدید خام (بایت \n) داخل
+// رشته‌ها هستند که پارسر Go را می‌شکنند. این خطوط حذف می‌شوند.
 
 func consumeJSONBlob(pt []byte, res *processResult) {
     pt = trimNonPrintable(pt)
@@ -882,10 +836,18 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
+    // فیکس: حذف خطوط جدید خام و تب — JSON را معتبر می‌کند
+    parseable := pt
+    if bytes.ContainsAny(parseable, "\n\r\t") {
+        parseable = bytes.ReplaceAll(parseable, []byte("\n"), nil)
+        parseable = bytes.ReplaceAll(parseable, []byte("\r"), nil)
+        parseable = bytes.ReplaceAll(parseable, []byte("\t"), nil)
+    }
+
     var root any
-    if err := json.Unmarshal(pt, &root); err == nil {
+    if err := json.Unmarshal(parseable, &root); err == nil {
         if isNoiseJSON(root) {
-            res.Errors = append(res.Errors, "یک بلوک متادیتای قفل (بدون کانفیگ) نادیده گرفته شد")
+            res.Errors = append(res.Errors, "متادیتای قفل نادیده گرفته شد")
             return
         }
         var uris []string
@@ -900,7 +862,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    objs := splitJSONObjects(pt)
+    objs := splitJSONObjects(parseable)
     if len(objs) > 1 {
         foundAny := false
         for _, obj := range objs {
@@ -923,7 +885,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         }
     }
 
-    if uris := scanPlainURIs(pt); len(uris) > 0 {
+    if uris := scanPlainURIs(parseable); len(uris) > 0 {
         res.URIs = append(res.URIs, uris...)
         return
     }
@@ -1010,8 +972,7 @@ func decodeOne(text string) ([]byte, error) {
     if b, err := base64.URLEncoding.DecodeString(padded); err == nil {
         return b, nil
     }
-
-    return nil, fmt.Errorf("قالب توکن شناسایی نشد: %.32s…", text)
+    return nil, fmt.Errorf("فرمت توکن ناشناخته")
 }
 
 func decodeB64Loose(text string) ([]byte, bool) {
@@ -1089,7 +1050,6 @@ func splitJSONObjects(data []byte) [][]byte {
 var uriSchemes = []string{
     "vless://", "vmess://", "trojan://", "ss://", "ssr://",
     "hysteria2://", "hy2://", "hysteria://", "tuic://",
-    "socks://", "socks5://",
 }
 
 func scanPlainURIs(pt []byte) []string {
@@ -1219,12 +1179,11 @@ func ctrCrypt(nonce [16]byte, data []byte) []byte {
 
 func decrypt(ciphertextWithNonce []byte) ([]byte, error) {
     if len(ciphertextWithNonce) < 16 {
-        return nil, fmt.Errorf("ciphertext must be at least 16 bytes")
+        return nil, fmt.Errorf("ciphertext too short")
     }
     var nonce [16]byte
     copy(nonce[:], ciphertextWithNonce[:16])
-    ct := ciphertextWithNonce[16:]
-    return ctrCrypt(nonce, ct), nil
+    return ctrCrypt(nonce, ciphertextWithNonce[16:]), nil
 }
 
 func ctrIncrement(counter *[16]byte) {
@@ -1240,7 +1199,6 @@ func ctrIncrement(counter *[16]byte) {
 
 // ═══════════════════ پیمایش JSON ═══════════════════
 
-// cleanEmbeddedJSON: رشته‌ی JSON چندخطی را برای پارس آماده می‌کند
 func cleanEmbeddedJSON(c string) []byte {
     c = strings.ReplaceAll(c, "\\n", "")
     c = strings.ReplaceAll(c, "\\r", "")
@@ -1347,9 +1305,6 @@ type kcpSettingsT struct {
 type quicSettingsT struct {
     Security string `json:"security"`
     Key      string `json:"key"`
-    Header   struct {
-        Type string `json:"type"`
-    } `json:"header"`
 }
 
 type httpUpgradeSettingsT struct {
@@ -1418,10 +1373,6 @@ func getPortString(p any) string {
         return v
     case float64:
         return fmt.Sprintf("%.0f", v)
-    case int:
-        return fmt.Sprintf("%d", v)
-    case int64:
-        return fmt.Sprintf("%d", v)
     default:
         return fmt.Sprintf("%v", v)
     }
@@ -1440,7 +1391,7 @@ func escapeUserInfo(s string) string {
 
 func cleanRemarks(s string) string {
     s = strings.ReplaceAll(s, "#", "")
-    s = strings.ReplaceAll(s, "\n", " ")
+    s = strings.ReplaceAll(s, "\n", "_")
     s = strings.ReplaceAll(s, "\r", "")
     s = strings.TrimSpace(s)
     s = strings.ReplaceAll(s, " ", "_")
@@ -1453,7 +1404,6 @@ func formatQuery(q url.Values) string {
     s = strings.ReplaceAll(s, "%2F", "/")
     s = strings.ReplaceAll(s, "%40", "@")
     s = strings.ReplaceAll(s, "%3A", ":")
-    s = strings.ReplaceAll(s, "%2C", ",")
     return s
 }
 
@@ -1513,9 +1463,6 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             if ss.QUICSettings.Key != "" {
                 q.Set("key", ss.QUICSettings.Key)
             }
-            if ss.QUICSettings.Header.Type != "" {
-                q.Set("headerType", ss.QUICSettings.Header.Type)
-            }
         }
     case "httpupgrade":
         if ss.HTTPUpgradeSettings != nil {
@@ -1549,17 +1496,11 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             if ss.RealitySettings.ServerName != "" {
                 q.Set("sni", ss.RealitySettings.ServerName)
             }
-            if ss.RealitySettings.Fingerprint != "" {
-                q.Set("fp", ss.RealitySettings.Fingerprint)
-            }
             if ss.RealitySettings.PublicKey != "" {
                 q.Set("pbk", ss.RealitySettings.PublicKey)
             }
             if ss.RealitySettings.ShortId != "" {
                 q.Set("sid", ss.RealitySettings.ShortId)
-            }
-            if ss.RealitySettings.SpiderX != "" {
-                q.Set("spx", ss.RealitySettings.SpiderX)
             }
         }
     }
@@ -1568,7 +1509,7 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
 
 func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, error) {
     if len(vs.Vnext) == 0 || len(vs.Vnext[0].Users) == 0 {
-        return "", fmt.Errorf("vless: missing vnext/user")
+        return "", fmt.Errorf("vless: missing user")
     }
     v := vs.Vnext[0]
     u := v.Users[0]
@@ -1589,7 +1530,7 @@ func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
 
 func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, error) {
     if len(vs.Vnext) == 0 || len(vs.Vnext[0].Users) == 0 {
-        return "", fmt.Errorf("vmess: missing vnext/user")
+        return "", fmt.Errorf("vmess: missing user")
     }
     v := vs.Vnext[0]
     u := v.Users[0]
@@ -1611,10 +1552,6 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
             path = ss.WSSettings.Path
             if ss.WSSettings.Host != "" {
                 host = ss.WSSettings.Host
-            } else if h, ok := ss.WSSettings.Headers["Host"]; ok {
-                host = h
-            } else if h, ok := ss.WSSettings.Headers["host"]; ok {
-                host = h
             }
         }
     case "grpc":
@@ -1628,13 +1565,9 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
         }
     }
 
-    sni, fp, alpn := "", "", ""
+    sni := ""
     if ss.TLSSettings != nil {
         sni = ss.TLSSettings.ServerName
-        fp = ss.TLSSettings.Fingerprint
-        if len(ss.TLSSettings.Alpn) > 0 {
-            alpn = strings.Join(ss.TLSSettings.Alpn, ",")
-        }
     }
 
     scy := u.Security
@@ -1648,7 +1581,7 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
         "add":  v.Address,
         "port": fmt.Sprintf("%d", v.Port),
         "id":   u.Id,
-        "aid":  fmt.Sprintf("%d", u.AlterId),
+        "aid":  "0",
         "scy":  scy,
         "net":  network,
         "type": "none",
@@ -1656,8 +1589,6 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, e
         "path": path,
         "tls":  tlsFlag,
         "sni":  sni,
-        "fp":   fp,
-        "alpn": alpn,
     }
     b, err := json.Marshal(obj)
     if err != nil {
@@ -1681,7 +1612,7 @@ func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) (string
 
 func shadowsocksURI(ts serversSettingsT, remarks string) (string, error) {
     if len(ts.Servers) == 0 {
-        return "", fmt.Errorf("shadowsocks: missing server")
+        return "", fmt.Errorf("ss: missing server")
     }
     s := ts.Servers[0]
     userInfo := base64.RawURLEncoding.EncodeToString([]byte(s.Method + ":" + s.Password))
@@ -1719,46 +1650,8 @@ func outboundToURI(protocol string, settingsRaw, streamRaw json.RawMessage, rema
             return "", err
         }
         return shadowsocksURI(ts, remarks)
-    case "hysteria2", "hy2":
-        var h struct {
-            Servers []struct {
-                Address  string `json:"address"`
-                Port     int    `json:"port"`
-                Password string `json:"password"`
-                Auth     string `json:"auth"`
-            } `json:"servers"`
-        }
-        if err := json.Unmarshal(settingsRaw, &h); err == nil && len(h.Servers) > 0 {
-            srv := h.Servers[0]
-            auth := srv.Password
-            if auth == "" {
-                auth = srv.Auth
-            }
-            q := buildStreamQuery(&ss)
-            return fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s", escapeUserInfo(auth), formatHost(srv.Address), srv.Port, formatQuery(q), cleanRemarks(remarks)), nil
-        }
-        return "", fmt.Errorf("invalid hysteria2 config")
-    case "tuic":
-        var t struct {
-            Servers []struct {
-                Address  string `json:"address"`
-                Port     int    `json:"port"`
-                UUID     string `json:"uuid"`
-                Password string `json:"password"`
-            } `json:"servers"`
-        }
-        if err := json.Unmarshal(settingsRaw, &t); err == nil && len(t.Servers) > 0 {
-            srv := t.Servers[0]
-            pass := srv.UUID
-            if pass == "" {
-                pass = srv.Password
-            }
-            q := buildStreamQuery(&ss)
-            return fmt.Sprintf("tuic://%s:%s@%s:%d?%s#%s", escapeUserInfo(pass), escapeUserInfo(srv.Password), formatHost(srv.Address), srv.Port, formatQuery(q), cleanRemarks(remarks)), nil
-        }
-        return "", fmt.Errorf("invalid tuic config")
     default:
-        return "", fmt.Errorf("unsupported protocol: %s", protocol)
+        return "", fmt.Errorf("unsupported: %s", protocol)
     }
 }
 
@@ -1790,9 +1683,6 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
         remarks := cfg.Remarks
         if remarks == "" {
             remarks = hdr.Tag
-        }
-        if remarks == "" {
-            remarks = hdr.Protocol
         }
         uri, err := outboundToURI(hdr.Protocol, hdr.Settings, hdr.StreamSettings, remarks)
         if err != nil {
@@ -1829,11 +1719,9 @@ func extractFromV2rayProfile(b []byte) ([]string, error) {
     if p.Server != "" {
         if (p.ConfigType == 3 || p.Method != "") && p.Password != "" {
             userInfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.Password))
-            uri := fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(p.Server), portStr, remarks)
-            uris = append(uris, uri)
+            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(p.Server), portStr, remarks))
         } else if p.ConfigType == 4 || (p.Password != "" && p.Method == "") {
-            uri := fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(p.Password), formatHost(p.Server), portStr, remarks)
-            uris = append(uris, uri)
+            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(p.Password), formatHost(p.Server), portStr, remarks))
         }
     }
 
