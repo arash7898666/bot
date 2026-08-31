@@ -20,7 +20,7 @@ import (
 )
 
 const npvsWrapSize = 60
-const npvsEngine = "NPVS Engine v3"
+const npvsEngine = "NPVS Engine v4"
 
 // ═══════════════════ رمزهای در انتظار ═══════════════════
 
@@ -65,7 +65,7 @@ func startPassReaper() {
     }()
 }
 
-// ═══════════════════ Sentinel ها (npvs1:...) — فیکس اصلی ═══════════════════
+// ═══════════════════ Sentinel (npvs1:...) ═══════════════════
 
 const npvSentinelPrefix = "npvs1:"
 const npvSentinelAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=_-"
@@ -110,24 +110,24 @@ func decodeNpvSentinels(s string) string {
     }
 }
 
-// ═══════════════════ Regex — هر دو حالت escape/ساده ═══════════════════
+// ═══════════════════ Regex ═══════════════════
 
 var (
-    reProtocol  = regexp.MustCompile(`(?:\\*)"protocol(?:\\*)"\s*:\s*(?:\\*)"(trojan|vless|vmess|shadowsocks)(?:\\*)"`)
-    reAddress   = regexp.MustCompile(`(?:\\*)"address(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
-    reServer    = regexp.MustCompile(`(?:\\*)"server(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reProtocol   = regexp.MustCompile(`(?:\\*)"protocol(?:\\*)"\s*:\s*(?:\\*)"(trojan|vless|vmess|shadowsocks)(?:\\*)"`)
+    reAddress    = regexp.MustCompile(`(?:\\*)"address(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reServer     = regexp.MustCompile(`(?:\\*)"server(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
     reServerPort = regexp.MustCompile(`(?:\\*)"serverPort(?:\\*)"\s*:\s*(?:\\*)"?([^"\\,}\]]+)(?:\\*)"?`)
-    rePort      = regexp.MustCompile(`(?:\\*)"port(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
-    rePassword  = regexp.MustCompile(`(?:\\*)"password(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reMethod    = regexp.MustCompile(`(?:\\*)"method(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reNetwork   = regexp.MustCompile(`(?:\\*)"network(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reWSSHost   = regexp.MustCompile(`(?:\\*)"host(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reWSPath    = regexp.MustCompile(`(?:\\*)"path(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reSecurity  = regexp.MustCompile(`(?:\\*)"security(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reSNI       = regexp.MustCompile(`(?:\\*)"serverName(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reFinger    = regexp.MustCompile(`(?:\\*)"fingerprint(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reRemarks   = regexp.MustCompile(`(?:\\*)"remarks(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
-    reUUID      = regexp.MustCompile(`(?:\\*)"id(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    rePort       = regexp.MustCompile(`(?:\\*)"port(?:\\*)"\s*:\s*(?:\\*)"?(\d+)(?:\\*)"?`)
+    rePassword   = regexp.MustCompile(`(?:\\*)"password(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reMethod     = regexp.MustCompile(`(?:\\*)"method(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reNetwork    = regexp.MustCompile(`(?:\\*)"network(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reWSSHost    = regexp.MustCompile(`(?:\\*)"host(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reWSPath     = regexp.MustCompile(`(?:\\*)"path(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reSecurity   = regexp.MustCompile(`(?:\\*)"security(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reSNI        = regexp.MustCompile(`(?:\\*)"serverName(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reFinger     = regexp.MustCompile(`(?:\\*)"fingerprint(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reRemarks    = regexp.MustCompile(`(?:\\*)"remarks(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reUUID       = regexp.MustCompile(`(?:\\*)"id(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
 )
 
 func firstGroup(re *regexp.Regexp, s string) string {
@@ -155,7 +155,11 @@ func normalizeAddr(addr, port string) (string, string) {
     return addr, port
 }
 
-// ═══════════════════ 🔧 دیباگ ═══════════════════
+// 🔒 اولویت ۱: پیام دیباگ فقط وقتی DEBUG=1 فعال است
+// (در حالت عادی هیچ داده‌ای از کانفیگ لو نمی‌رود)
+func debugModeEnabled() bool {
+    return os.Getenv("DEBUG") == "1"
+}
 
 func debugPreview(s string, n int) string {
     if len(s) > n {
@@ -169,21 +173,24 @@ func debugPreview(s string, n int) string {
 }
 
 func npvsDebugInfo(pt []byte) string {
-    lower := strings.ToLower(string(pt))
     var sb strings.Builder
-    sb.WriteString("🔧 " + npvsEngine + " — دیباگ\n")
-    sb.WriteString("ℹ️ لینک ساخته نشد:\n\n")
-    sb.WriteString(fmt.Sprintf("📊 حجم متن: %d بایت\n", len(pt)))
-    sb.WriteString("🔍 علامت‌ها:\n")
-    fmt.Fprintf(&sb, "   protocol=%d | trojan=%d | vless=%d | vmess=%d\n",
+    sb.WriteString("🔧 " + npvsEngine + " — دیباگ (DEBUG فعال)\n")
+    lower := strings.ToLower(string(pt))
+    sb.WriteString(fmt.Sprintf("📊 حجم: %d بایت\n", len(pt)))
+    fmt.Fprintf(&sb, "   protocol=%d trojan=%d vless=%d vmess=%d\n",
         strings.Count(lower, "protocol"), strings.Count(lower, "trojan"),
         strings.Count(lower, "vless"), strings.Count(lower, "vmess"))
-    fmt.Fprintf(&sb, "   server=%d | password=%d | method=%d | npvs1=%d\n",
+    fmt.Fprintf(&sb, "   server=%d password=%d npvs1=%d\n",
         strings.Count(lower, "server"), strings.Count(lower, "password"),
-        strings.Count(lower, "method"), strings.Count(lower, "npvs1:"))
-    sb.WriteString("\n📝 ۴۰۰ کاراکتر اول:\n")
+        strings.Count(lower, "npvs1:"))
+    sb.WriteString("📝 ۴۰۰ کاراکتر اول:\n")
     sb.WriteString(debugPreview(string(pt), 400))
     return sb.String()
+}
+
+// پیام جایگزین بدون لو دادن داده
+func npvsNoLinkMessage() string {
+    return "🔧 " + npvsEngine + "\n⚠️ متن رمزگشایی شد ولی کانفیگ قابل شناسایی نبود.\n💡 اگر فایل معتبر است با سازنده چک کنید."
 }
 
 // ═══════════════════ استخراج ═══════════════════
@@ -491,7 +498,7 @@ type npvsHeader struct {
     Policy     struct {
         DisplayMessage      string  `json:"displayMessage"`
         CustomServerMessage string  `json:"customServerMessage"`
-        ExpiresAt           *string `json:"expiresAt"`
+        ExpiresAt           *string `json:"expiresAt"
     } `json:"policy"`
     Recipients []json.RawMessage `json:"recipients"`
 }
@@ -504,7 +511,6 @@ type npvsEnvelope struct {
 }
 
 func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
-    // مسیر باینری: NPVS + ver(1) + hdrLen(4BE) + JSON + nonce(12) + bodyLen(4BE) + body
     if len(b) >= 89 && bytes.HasPrefix(b, []byte("NPVS")) && b[4] <= 1 {
         hdrLen := int(binary.BigEndian.Uint32(b[5:9]))
         if hdrLen > 2 && 9+hdrLen < len(b) {
@@ -528,7 +534,6 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         }
     }
 
-    // مسیر متنی (fallback)
     if bytes.HasPrefix(b, []byte("NPVS")) {
         start := bytes.IndexByte(b, '{')
         if start > 4 {
@@ -594,9 +599,10 @@ func npvsB64URL(s string) ([]byte, error) {
     return base64.URLEncoding.DecodeString(s)
 }
 
-// ═══════════════════ White-Box ═══════════════════
+// ═══════════════════ White-Box — ⚡ نسخه سریع با کش کامل ═══════════════════
 
 const wbTlastSize = 4096
+const wbTableSize = 16384
 const wbXorSize = 24576
 
 var (
@@ -619,41 +625,86 @@ var npvsRepoBases = []string{
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@master/internal/modules/impl/assets/npvs/",
 }
 
+// 💾 باگ‌فیکس: کش کامل — همه فایل‌ها روی دیسک کش می‌شوند
+// بعد از ری‌استارت حتی بدون شبکه کار می‌کند
 func npvsGetBlob(name string, want int) []byte {
+    // ۱) کش دائمی روی دیسک (اولین اولویت — سریع‌ترین)
+    cache := "npvs_cache_" + name
+    if b, err := os.ReadFile(cache); err == nil && len(b) == want {
+        return b
+    }
+
+    // ۲) فایل‌های محلی در ریپو
     for _, p := range []string{os.Getenv("NPVS_DIR"), "npvs", "assets/npvs", "."} {
         if p == "" {
             continue
         }
         if b, err := os.ReadFile(p + "/" + name); err == nil && len(b) == want {
+            _ = os.WriteFile(cache, b, 0644) // 💾 کش کن
             return b
         }
     }
-    cache := "npvs_cache_" + name
-    if b, err := os.ReadFile(cache); err == nil && len(b) == want {
-        return b
-    }
+
+    // ۳) دانلود از گیت‌هاب
     for _, u := range npvsRepoBases {
         b, err := fetchURL(u + name)
         if err == nil && len(b) == want {
-            _ = os.WriteFile(cache, b, 0644)
+            _ = os.WriteFile(cache, b, 0644) // 💾 کش کن
             return b
         }
     }
     return nil
 }
 
+// 💡 باگ‌فیکس: تابع عمومی برای پیش‌بارگذاری در زمان استارت
+// (دیگر کاربر اول منتظر نمی‌ماند)
+func preloadNPVS() {
+    go func() {
+        start := time.Now()
+        loadWB()
+        log.Printf("⚡ جداول NPVS از قبل آماده شد (%v)", time.Since(start).Round(time.Millisecond))
+    }()
+}
+
 func loadWB() {
     wbOnce.Do(func() {
-        wbTy = tyBoxes
-        wbMbl = mbl
-        wbXorBin = make([]byte, wbXorSize)
-        for t := 0; t < 96; t++ {
-            for a := 0; a < 16; a++ {
-                for b := 0; b < 16; b++ {
-                    wbXorBin[(t<<8)+(a<<4)+b] = xorTable[t][a][b]
+        // جداول مشترک: اول کش، بعد محلی (tables_loader)، بعد گیت‌هاب
+        if b := npvsGetBlob("tyboxes.bin", wbTableSize); b != nil {
+            for i := 0; i < 16; i++ {
+                for j := 0; j < 256; j++ {
+                    k := (i*256 + j) * 4
+                    wbTy[i][j] = binary.BigEndian.Uint32(b[k:])
+                }
+            }
+        } else {
+            wbTy = tyBoxes // fallback از tables_loader
+        }
+
+        if b := npvsGetBlob("mbl.bin", wbTableSize); b != nil {
+            for i := 0; i < 16; i++ {
+                for j := 0; j < 256; j++ {
+                    k := (i*256 + j) * 4
+                    wbMbl[i][j] = binary.BigEndian.Uint32(b[k:])
+                }
+            }
+        } else {
+            wbMbl = mbl // fallback
+        }
+
+        if b := npvsGetBlob("xor.bin", wbXorSize); b != nil {
+            wbXorBin = b
+        } else {
+            // ساخت از xorTable موجود
+            wbXorBin = make([]byte, wbXorSize)
+            for t := 0; t < 96; t++ {
+                for a := 0; a < 16; a++ {
+                    for bb := 0; bb < 16; bb++ {
+                        wbXorBin[(t<<8)+(a<<4)+bb] = xorTable[t][a][bb]
+                    }
                 }
             }
         }
+
         base := tboxesLast
         wbTlastVariants = append(wbTlastVariants, &base)
         for _, name := range []string{"tboxes_last.bin", "tboxes_last_v2.bin"} {
@@ -789,9 +840,6 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
     if password == "" {
         return nil, fmt.Errorf("رمز لازم است")
     }
-    if p.Iters < 1 || p.Iters > 10000000 {
-        return nil, fmt.Errorf("تکرار نامعتبر: %d", p.Iters)
-    }
     salt, err := npvsB64URL(p.Salt)
     if err != nil || len(salt) < 16 {
         return nil, fmt.Errorf("salt نامعتبر")
@@ -855,7 +903,6 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, err, false
     }
 
-    // ۱) رمز دلخواه → بپرس
     if env.hdr.Passphrase != nil {
         setPendingPass(chatID, "npvs", data)
         if env.hdr.Policy.DisplayMessage != "" {
@@ -866,24 +913,26 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
-    // ۲) appKey → باز کردن با White-Box
     if env.hdr.AppKey != nil {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
             if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
-                // ✅ فیکس اصلی: اول Sentinel ها decode می‌شوند، بعد استخراج
                 decoded := decodeNpvSentinels(string(pt))
                 res.URIs = regexExtractFromText(decoded)
                 if len(res.URIs) > 0 {
                     return res, nil, false
                 }
-                res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
+                // 🔒 دیباگ فقط با DEBUG=1
+                if debugModeEnabled() {
+                    res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
+                } else {
+                    res.Raw = append(res.Raw, npvsNoLinkMessage())
+                }
                 return res, nil, false
             }
         }
     }
 
-    // ۳) نمایش وضعیت
     var sb strings.Builder
     sb.WriteString("🔧 " + npvsEngine + "\n")
     sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
@@ -910,7 +959,6 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
-    // نسخه‌های مختلف رمز
     attempts := []string{
         password,
         strings.TrimSpace(password),
@@ -931,7 +979,7 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         }
     }
     if dek == nil {
-        return nil, fmt.Errorf("رمز اشتباه — همان رمزی که سازنده اعلام کرده را بفرستید")
+        return nil, fmt.Errorf("🔑 رمز اشتباه — دوباره رمز را بفرستید")
     }
 
     pt, err := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
@@ -939,13 +987,16 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         return nil, err
     }
 
-    // ✅ فیکس اصلی: اول Sentinel ها decode می‌شوند، بعد استخراج
     decoded := decodeNpvSentinels(string(pt))
 
     res := &processResult{}
     res.URIs = regexExtractFromText(decoded)
     if len(res.URIs) == 0 {
-        res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
+        if debugModeEnabled() {
+            res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
+        } else {
+            res.Raw = append(res.Raw, npvsNoLinkMessage())
+        }
     }
     return res, nil
 }
