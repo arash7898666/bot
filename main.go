@@ -795,7 +795,7 @@ func tryNPVT(text string) *processResult {
     }
 
     decoded := 0
-    for i, tok := range tokens {
+    for _, tok := range tokens {
         tok = strings.TrimSpace(tok)
         if tok == "" {
             continue
