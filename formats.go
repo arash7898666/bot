@@ -15,7 +15,6 @@ import (
     "errors"
     "fmt"
     "io"
-    "log"
     "net/url"
     "regexp"
     "strings"
@@ -33,7 +32,7 @@ import (
 //  formats.go — SlipNet • NetMod • HAT • Happ • EHI • DarkTunnel
 // ═══════════════════════════════════════════════════════════════
 
-// ─────────────── تشخیص لینک در هر جای متن + پاک‌سازی کاراکترهای نامرئی ───────────────
+// ─────────────── تشخیص لینک + پاک‌سازی کاراکترهای نامرئی ───────────────
 
 var (
     slipnetLinkRe = regexp.MustCompile(`(?:slipnet-bundle-enc|slipnet-enc|slipnet)://[A-Za-z0-9+/=\-_]+`)
@@ -66,9 +65,15 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
     case ".dark":
         res, err := processDarkContent(data)
         return res, err, false
+    case ".npvs":
+        return handleNPVS(data, chatID)
     }
 
     text := cleanInvisible(string(data))
+
+    if strings.HasPrefix(text, "NPVS") {
+        return handleNPVS(data, chatID)
+    }
 
     if m := slipnetLinkRe.FindString(text); m != "" {
         return processSlipnet([]byte(m), chatID)
@@ -88,50 +93,7 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
     return res, err, false
 }
 
-// ─────────────── باندل رمزدار SlipNet (با TTL و پاک‌سازی دوره‌ای) ───────────────
-
-type pendingBundle struct {
-    data    []byte
-    created time.Time
-}
-
-var pendingBundles sync.Map
-
-const bundleTTL = 10 * time.Minute
-
-func setPendingBundle(chatID int64, data []byte) {
-    pendingBundles.Store(chatID, pendingBundle{data: data, created: time.Now()})
-}
-
-// خروجی: (داده، پیدا شد، منقضی) — اتمیک با LoadAndDelete
-func takePendingBundle(chatID int64) ([]byte, bool, bool) {
-    v, ok := pendingBundles.LoadAndDelete(chatID)
-    if !ok {
-        return nil, false, false
-    }
-    b, ok := v.(pendingBundle)
-    if !ok {
-        return nil, false, false
-    }
-    if time.Since(b.created) > bundleTTL {
-        return nil, false, true
-    }
-    return b.data, true, false
-}
-
-// پاک‌سازی باندل‌های رهاشده — جلوگیری از نشتی حافظه
-func startBundleReaper() {
-    go func() {
-        for range time.Tick(5 * time.Minute) {
-            pendingBundles.Range(func(k, v any) bool {
-                if b, ok := v.(pendingBundle); ok && time.Since(b.created) > bundleTTL {
-                    pendingBundles.Delete(k)
-                }
-                return true
-            })
-        }
-    }()
-}
+// ─────────────── باندل رمزدار SlipNet ───────────────
 
 func trySlipnetBundleDecrypt(bundleData []byte, password string) (*processResult, error) {
     plaintext, err := slipDecryptBundle(bundleData, password)
@@ -236,7 +198,6 @@ const (
     slipKeySize       = 32
 )
 
-// اسکیماها با کپی مستقل (extend) ساخته می‌شوند تا اسلایس پایه هرگز دستکاری نشود
 var slipSchemas = func() map[string][]string {
     extend := func(base []string, extra ...string) []string {
         out := make([]string, 0, len(base)+len(extra))
@@ -277,7 +238,6 @@ var slipSchemas = func() map[string][]string {
     }
 }()
 
-// نگاشت نام فیلد → اندیس (جست‌وجوی O(1) به‌جای خطی)
 var slipFieldIndex = func() map[string]map[string]int {
     out := map[string]map[string]int{}
     for ver, schema := range slipSchemas {
@@ -290,7 +250,6 @@ var slipFieldIndex = func() map[string]map[string]int {
     return out
 }()
 
-// فرمت موبایل-پسند: «Label: value» به‌جای ستون‌های به‌هم‌ریخته
 func parseSlipProfile(decryptedText string) string {
     decryptedText = strings.TrimSuffix(decryptedText, "|")
     parts := strings.Split(decryptedText, "|")
@@ -349,8 +308,6 @@ func slipField(parts []string, name string) string {
     }
     return strings.TrimSpace(parts[i])
 }
-
-// ─────────────── ساخت vless:// از فیلدهای پروفایل SlipNet ───────────────
 
 func slipExtractVless(plaintext string) string {
     plaintext = strings.TrimSuffix(plaintext, "|")
@@ -419,7 +376,6 @@ func slipExtractVless(plaintext string) string {
         uuid, formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
-// AEAD کلید ثابت — یک‌بار ساخته می‌شود (cipher.AEAD برای استفاده همزمان امن است)
 var slipAEAD = func() cipher.AEAD {
     key, _ := hex.DecodeString(slipKeyHex)
     block, _ := aes.NewCipher(key)
@@ -497,7 +453,7 @@ func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
     // ۲) باندل رمزدار؟ → ربات رمز را می‌خواهد
     if b, ok := decodeB64Loose(text); ok && len(b) >= 1+slipSaltLen+slipIVLen+16 {
         if b[0] == slipFormatVersion {
-            setPendingBundle(chatID, b)
+            setPendingPass(chatID, "slip", b)
             return nil, nil, true
         }
     }
@@ -603,7 +559,7 @@ func getHappEngine() (*happEngine, error) {
         p.linkRegex = regexp.MustCompile(`^(?:happ://)?([^/]+)/(.+)$`)
         versionMap := []string{"crypt", "crypt2", "crypt3", "crypt4"}
         if len(happPKCS1KeysB64) > len(versionMap) {
-            log.Printf("⚠️ تعداد کلیدهای Happ بیشتر از نسخه‌های شناخته‌شده است (%d > %d)", len(happPKCS1KeysB64), len(versionMap))
+            fmt.Printf("⚠️ تعداد کلیدهای Happ بیشتر از نسخه‌های شناخته‌شده است (%d > %d)\n", len(happPKCS1KeysB64), len(versionMap))
         }
         for idx, b64RawKey := range happPKCS1KeysB64 {
             if idx >= len(versionMap) {
