@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.5-NPVS-FIX2"
+const botVersion = "7.6-NPVS-FIX3"
 
 const (
     msgLimit    = 3900
@@ -235,7 +235,7 @@ func setBotCommands() {
 func main() {
     token := os.Getenv("BOT_TOKEN")
     if token == "" {
-        log.Fatal("❌ BOT_TOKEN تنظیم نشده. توکن را از @BotFather بگیرید.")
+        log.Fatal("❌ BOT_TOKEN تنظیم نشده.")
     }
 
     for _, s := range strings.Split(os.Getenv("ADMIN_IDS"), ",") {
@@ -296,7 +296,6 @@ func handleMessage(msg *tgbotapi.Message) {
 
     trackUser(msg.From)
 
-    // ─── جوین اجباری (ادمین رد می‌شود) ───
     settingsMu.Lock()
     forceCh := settings.ForceChannel
     settingsMu.Unlock()
@@ -307,7 +306,6 @@ func handleMessage(msg *tgbotapi.Message) {
         }
     }
 
-    // ─── دستورات ───
     if msg.IsCommand() {
         switch msg.Command() {
         case "start", "help":
@@ -320,29 +318,29 @@ func handleMessage(msg *tgbotapi.Message) {
             reply(chatID, "📢 وضعیت جوین اجباری: "+channelStatus())
         case "setchannel":
             if !admin {
-                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                reply(chatID, "⛔ فقط ادمین.")
                 return
             }
             handleSetChannel(msg, chatID)
         case "stats":
             if !admin {
-                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                reply(chatID, "⛔ فقط ادمین.")
                 return
             }
             reply(chatID, statsText())
         case "broadcast":
             if !admin {
-                reply(chatID, "⛔ این دستور فقط برای ادمین است.")
+                reply(chatID, "⛔ فقط ادمین.")
                 return
             }
             handleBroadcast(msg, chatID)
         default:
-            reply(chatID, "❓ دستور ناشناخته. /help را بزنید.")
+            reply(chatID, "❓ دستور ناشناخته. /help")
         }
         return
     }
 
-    // ─── بررسی فایل رمزدار در انتظار (SlipNet / NPVS) ───
+    // ─── فایل رمزدار در انتظار ───
     if strings.TrimSpace(msg.Text) != "" {
         if kind, fd, found, expired := takePendingPass(chatID); found || expired {
             if expired {
@@ -359,7 +357,7 @@ func handleMessage(msg *tgbotapi.Message) {
             }
             if berr != nil {
                 setPendingPass(chatID, kind, fd)
-                reply(chatID, "❌ "+berr.Error()+"\n\n🔑 دوباره رمز را بفرستید، یا فایل را از نو ارسال کنید.")
+                reply(chatID, "❌ "+berr.Error()+"\n\n🔑 دوباره رمز را بفرستید.")
             } else {
                 sendBundleResult(chatID, bres)
             }
@@ -367,9 +365,8 @@ func handleMessage(msg *tgbotapi.Message) {
         }
     }
 
-    // ─── قفل هر-کاربر ───
     if !tryAcquireUser(chatID) {
-        reply(chatID, "⏳ درخواست قبلی شما هنوز در حال پردازش است. لطفاً منتظر بمانید.")
+        reply(chatID, "⏳ درخواست قبلی هنوز در حال پردازش است.")
         return
     }
     defer releaseUser(chatID)
@@ -382,7 +379,7 @@ func handleMessage(msg *tgbotapi.Message) {
     switch {
     case msg.Document != nil:
         if msg.Document.FileSize > 19*1024*1024 {
-            reply(chatID, "❌ فایل بزرگ‌تر از ۱۹ مگابایت است.")
+            reply(chatID, "❌ فایل بزرگ‌تر از ۱۹ مگابایت.")
             return
         }
         pm := tgbotapi.NewMessage(chatID, "⏳ در حال دانلود و رمزگشایی...")
@@ -392,7 +389,7 @@ func handleMessage(msg *tgbotapi.Message) {
         d, err := downloadFile(msg.Document.FileID)
         if err != nil {
             deleteProgress(chatID, progMsgID)
-            reply(chatID, "❌ دانلود فایل ناموفق بود:\n"+err.Error())
+            reply(chatID, "❌ دانلود ناموفق:\n"+err.Error())
             return
         }
         data = d
@@ -425,20 +422,19 @@ func handleMessage(msg *tgbotapi.Message) {
         name = "npvt"
 
     default:
-        reply(chatID, "📎 فایل را بفرستید یا محتوایش را متن کنید. /help")
+        reply(chatID, "📎 فایل را بفرستید. /help")
         return
     }
 
     incrementProcessed()
     sendAction(chatID, tgbotapi.ChatTyping)
 
-    // ─── پردازش با سقف زمان ───
     done := make(chan procOut, 1)
     go func() {
         defer func() {
             if r := recover(); r != nil {
-                log.Printf("💥 panic در پردازش: %v\n%s", r, debug.Stack())
-                done <- procOut{err: fmt.Errorf("خطای داخلی در پردازش")}
+                log.Printf("💥 panic: %v\n%s", r, debug.Stack())
+                done <- procOut{err: fmt.Errorf("خطای داخلی")}
             }
         }()
         r, e, np := processRouted(data, fileExt, chatID)
@@ -450,14 +446,14 @@ func handleMessage(msg *tgbotapi.Message) {
     case out = <-done:
     case <-time.After(procTimeout):
         deleteProgress(chatID, progMsgID)
-        reply(chatID, "⏱️ پردازش طولانی شد و متوقف گردید.\n\n🤖 "+botVersion)
+        reply(chatID, "⏱️ پردازش طولانی شد.\n\n🤖 "+botVersion)
         return
     }
 
     deleteProgress(chatID, progMsgID)
 
     if out.needPwd {
-        reply(chatID, "🔐 این فایل با رمز محافظت شده است!\n\n🔑 لطفاً رمز (Passphrase) را همین حالا بفرستید:")
+        reply(chatID, "🔐 این فایل با رمز محافظت شده است!\n\n🔑 رمز (Passphrase) را بفرستید:")
         return
     }
     if out.err != nil {
@@ -470,12 +466,11 @@ func handleMessage(msg *tgbotapi.Message) {
         if res != nil && len(res.Errors) > 0 {
             reply(chatID, "⚠️ کانفیگی استخراج نشد:\n"+strings.Join(res.Errors, "\n"))
         } else {
-            reply(chatID, "⚠️ در این ورودی کانفیگی پیدا نشد.\n\n🤖 "+botVersion)
+            reply(chatID, "⚠️ کانفیگی پیدا نشد.\n\n🤖 "+botVersion)
         }
         return
     }
 
-    // ─── خروجی: همیشه پیام تلگرامی (تکه‌تکه) ───
     var lines []string
     for i, u := range res.URIs {
         if i > 0 {
@@ -514,12 +509,11 @@ func sendJoinPrompt(chatID int64, channel string) {
         ),
     )
     m := tgbotapi.NewMessage(chatID, fmt.Sprintf(
-        "🔒 برای استفاده از ربات ابتدا در کانال عضو شوید:\n\n%s\n\n"+
-            "بعد از عضویت، دوباره بفرستید. 👇", channel))
+        "🔒 برای استفاده از ربات ابتدا عضو شوید:\n\n%s\n\nسپس دوباره بفرستید. 👇", channel))
     m.ReplyMarkup = keyboard
     m.DisableWebPagePreview = true
     if _, err := bot.Send(m); err != nil {
-        log.Printf("خطا در ارسال پیام عضویت: %v", err)
+        log.Printf("خطا در ارسال: %v", err)
     }
 }
 
@@ -653,11 +647,11 @@ func replyLines(chatID int64, lines []string) {
 func helpText() string {
     return `🔐 <b>ربات رمزگشای کانفیگ</b> — <code>` + botVersion + `</code>
 
-📤 فایل کانفیگ را بفرستید — فرمت خودکار تشخیص می‌شود.
+📤 فایل کانفیگ را بفرستید — فرمت خودکار تشخیص داده می‌شود.
 
-/formats → لیست فرمت‌ها
+/formats → فرمت‌ها
 /version → نسخه
-/channel → وضعیت کانال`
+/channel → کانال`
 }
 
 func formatsText() string {
@@ -827,8 +821,6 @@ func tryNPVT(text string) *processResult {
 }
 
 // ═══════════════════ مصرف JSON ═══════════════════
-// 🔧 فیکس اصلی: JSON های NPVS دارای خطوط جدید خام (بایت \n) داخل
-// رشته‌ها هستند که پارسر Go را می‌شکنند. این خطوط حذف می‌شوند.
 
 func consumeJSONBlob(pt []byte, res *processResult) {
     pt = trimNonPrintable(pt)
@@ -836,7 +828,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
         return
     }
 
-    // فیکس: حذف خطوط جدید خام و تب — JSON را معتبر می‌کند
+    // فیکس NPVS: حذف خطوط جدید خام و تب که پارسر را می‌شکنند
     parseable := pt
     if bytes.ContainsAny(parseable, "\n\r\t") {
         parseable = bytes.ReplaceAll(parseable, []byte("\n"), nil)
@@ -1014,7 +1006,7 @@ func splitJSONObjects(data []byte) [][]byte {
     start := -1
     inString := false
     escaped := false
-    for i, b := range data {
+    for _, b := range data {
         if escaped {
             escaped = false
             continue
@@ -1033,13 +1025,13 @@ func splitJSONObjects(data []byte) [][]byte {
         switch b {
         case '{':
             if depth == 0 {
-                start = i
+                start = -1
             }
             depth++
         case '}':
             depth--
             if depth == 0 && start >= 0 {
-                objects = append(objects, data[start:i+1])
+                objects = append(objects, data[start:])
                 start = -1
             }
         }
@@ -1216,31 +1208,15 @@ func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
         if raw, ok := x["v2rayJson"]; ok {
-            switch c := raw.(type) {
-            case string:
-                if c != "" {
-                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
-                        *uris = append(*uris, u...)
-                    }
-                }
-            case map[string]any:
-                b, _ := json.Marshal(c)
-                if u, err := extractURIsFromConfig(b); err == nil {
+            if c, ok := raw.(string); ok && c != "" {
+                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
         }
         if raw, ok := x["v2rRawJson"]; ok {
-            switch c := raw.(type) {
-            case string:
-                if c != "" {
-                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
-                        *uris = append(*uris, u...)
-                    }
-                }
-            case map[string]any:
-                b, _ := json.Marshal(c)
-                if u, err := extractURIsFromConfig(b); err == nil {
+            if c, ok := raw.(string); ok && c != "" {
+                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
@@ -1430,8 +1406,6 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             if ss.WSSettings.Host != "" {
                 q.Set("host", ss.WSSettings.Host)
             } else if h, ok := ss.WSSettings.Headers["Host"]; ok && h != "" {
-                q.Set("host", h)
-            } else if h, ok := ss.WSSettings.Headers["host"]; ok && h != "" {
                 q.Set("host", h)
             }
         }
@@ -1693,16 +1667,19 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
+// ═══ فیکس اصلی ۷.۶: پردازش v2rayJson حتی وقتی Server خالی است ═══
+
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
-    if err := json.Unmarshal(b, &p); err != nil || p.Server == "" {
+    _ = json.Unmarshal(b, &p)
+
+    if p.Server == "" && p.V2rayJson == "" {
         var wrapper struct {
             V2rayProfile napsternetProfile `json:"v2rayProfile"`
         }
-        if err2 := json.Unmarshal(b, &wrapper); err2 == nil && wrapper.V2rayProfile.Server != "" {
+        _ = json.Unmarshal(b, &wrapper)
+        if wrapper.V2rayProfile.Server != "" || wrapper.V2rayProfile.V2rayJson != "" {
             p = wrapper.V2rayProfile
-        } else if err != nil {
-            return nil, err
         }
     }
 
