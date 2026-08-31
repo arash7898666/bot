@@ -18,7 +18,11 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════
-//  npvs.go — NapsternetV v2 (.npvs) — appKey + Passphrase کامل
+//  npvs.go — NapsternetV v2 (.npvs)
+//  appKey (Anyone with the app) + Passphrase (رمز دلخواه)
+//  جداول White-Box از tables.txt موجود ساخته می‌شوند — طبق README
+//  ریپو، جداول ty/mbl/xor بین بیلدهای اپ مشترک‌اند و فقط
+//  tboxes_last تغییر می‌کند (چند نسخه امتحان می‌شود).
 // ═══════════════════════════════════════════════════════════════
 
 const npvsWrapSize = 60
@@ -144,6 +148,8 @@ func npvsJSONEnd(b []byte, start int) int {
     return -1
 }
 
+// مسیر باینری: NPVS + ver(1) + hdrLen(4BE) + JSON + nonce(12) + bodyLen(4BE) + body + sig(64)
+// مسیر متنی (fallback): NPVS%{JSON} + دنباله — برای وقتی متن آسیب دیده
 func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
     if len(b) >= 89 && bytes.HasPrefix(b, []byte("NPVS")) && b[4] <= 1 {
         hdrLen := int(binary.BigEndian.Uint32(b[5:9]))
@@ -157,6 +163,10 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
                     off += 16
                     if bodyLen >= 16 && off+bodyLen <= len(b) {
                         e.body = b[off : off+bodyLen]
+                        return e, nil
+                    }
+                    if off < len(b) {
+                        e.body = b[off:]
                         return e, nil
                     }
                 }
@@ -173,7 +183,7 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
                     tail := b[end+1:]
                     if len(tail) >= 28 {
                         e.nonce = tail[:12]
-                        e.body = tail[12:]
+                        e.body = tail[12:] // شامل طول+بدنه+امضا — واریانت‌ها در npvsOpenBody امتحان می‌شوند
                     }
                     return e, nil
                 }
@@ -211,7 +221,7 @@ func npvsB64URL(s string) ([]byte, error) {
     return base64.URLEncoding.DecodeString(s)
 }
 
-// ─────────────── White-Box NPVS (جداول .bin) ───────────────
+// ─────────────── White-Box NPVS ───────────────
 
 const (
     wbTlastSize = 4096
@@ -225,19 +235,19 @@ var (
 )
 
 var (
-    wbXorBin  []byte
-    wbTy      [16][256]uint32
-    wbMbl     [16][256]uint32
-    wbTlastV1 [16][256]byte
-    wbTlastV2 [16][256]byte
-    wbOnce    sync.Once
-    wbErr     error
+    wbXorBin        []byte
+    wbTy            [16][256]uint32
+    wbMbl           [16][256]uint32
+    wbTlastVariants []*[16][256]byte
+    wbOnce          sync.Once
+    wbErr           error
 )
 
 var npvsRepoBases = []string{
     "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/main/internal/modules/impl/assets/npvs/",
-    "https://raw.githubusercontent.com/KernelDotLL/Pantegnos/main/internal/modules/impl/assets/npvs/",
     "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/master/internal/modules/impl/assets/npvs/",
+    "https://raw.githubusercontent.com/FrontierTM/Pantegnos/main/internal/modules/impl/assets/npvs/",
+    "https://raw.githubusercontent.com/FrontierTM/Pantegnos/master/internal/modules/impl/assets/npvs/",
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@main/internal/modules/impl/assets/npvs/",
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@master/internal/modules/impl/assets/npvs/",
 }
@@ -247,8 +257,7 @@ func npvsGetBlob(name string, want int) ([]byte, error) {
         if p == "" {
             continue
         }
-        full := p + "/" + name
-        if b, err := os.ReadFile(full); err == nil && len(b) == want {
+        if b, err := os.ReadFile(p + "/" + name); err == nil && len(b) == want {
             return b, nil
         }
     }
@@ -265,58 +274,86 @@ func npvsGetBlob(name string, want int) ([]byte, error) {
         }
         urls = append([]string{base}, urls...)
     }
-    var lastErr error
     for _, u := range urls {
         b, err := fetchURL(u + name)
-        if err != nil {
-            lastErr = err
-            continue
-        }
-        if len(b) != want {
-            lastErr = fmt.Errorf("%s: اندازه %d ≠ %d", name, len(b), want)
+        if err != nil || len(b) != want {
             continue
         }
         _ = os.WriteFile(cache, b, 0644)
         return b, nil
     }
-    return nil, fmt.Errorf("جدول %s پیدا نشد — فایل .bin را کنار ربات قرار دهید (%v)", name, lastErr)
+    return nil, fmt.Errorf("blob %s در دسترس نیست", name)
+}
+
+func tlastEqual(a, b *[16][256]byte) bool {
+    for i := 0; i < 16; i++ {
+        if !bytes.Equal(a[i][:], b[i][:]) {
+            return false
+        }
+    }
+    return true
 }
 
 func loadWB() error {
     wbOnce.Do(func() {
-        var t1, t2, ty, mbl, xor []byte
-        var err error
-        if xor, err = npvsGetBlob("xor.bin", wbXorSize); err != nil {
-            wbErr = err
-            return
-        }
-        if ty, err = npvsGetBlob("tyboxes.bin", wbTableSize); err != nil {
-            wbErr = err
-            return
-        }
-        if mbl, err = npvsGetBlob("mbl.bin", wbTableSize); err != nil {
-            wbErr = err
-            return
-        }
-        if t1, err = npvsGetBlob("tboxes_last.bin", wbTlastSize); err != nil {
-            wbErr = err
-            return
-        }
-        if t2, err = npvsGetBlob("tboxes_last_v2.bin", wbTlastSize); err != nil {
-            wbErr = err
-            return
-        }
-        wbXorBin = xor
-        for i := 0; i < 16; i++ {
-            copy(wbTlastV1[i][:], t1[i*256:(i+1)*256])
-            copy(wbTlastV2[i][:], t2[i*256:(i+1)*256])
-            for j := 0; j < 256; j++ {
-                k := (i*256 + j) * 4
-                wbTy[i][j] = binary.BigEndian.Uint32(ty[k:])
-                wbMbl[i][j] = binary.BigEndian.Uint32(mbl[k:])
+        // ۱) جداول مشترک — از tables.txt (همان جداول NPVT که tables_loader.go بارگذاری کرده)
+        wbTy = tyBoxes
+        wbMbl = mbl
+        wbXorBin = make([]byte, wbXorSize)
+        for t := 0; t < 96; t++ {
+            for a := 0; a < 16; a++ {
+                for b := 0; b < 16; b++ {
+                    wbXorBin[(t<<8)+(a<<4)+b] = xorTable[t][a][b]
+                }
             }
         }
-        log.Println("✅ جداول White-Box NPVS بارگذاری شد")
+
+        // ۲) tboxes_last — نسخه محلی + نسخه‌های دانلودی (بدون تکرار)
+        base := tboxesLast
+        wbTlastVariants = append(wbTlastVariants, &base)
+        for _, name := range []string{"tboxes_last.bin", "tboxes_last_v2.bin"} {
+            b, err := npvsGetBlob(name, wbTlastSize)
+            if err != nil {
+                continue // اختیاری — نسخه محلی موجود است
+            }
+            var t [16][256]byte
+            for i := 0; i < 16; i++ {
+                copy(t[i][:], b[i*256:(i+1)*256])
+            }
+            dup := false
+            for _, v := range wbTlastVariants {
+                if tlastEqual(v, &t) {
+                    dup = true
+                    break
+                }
+            }
+            if !dup {
+                wbTlastVariants = append(wbTlastVariants, &t)
+            }
+        }
+
+        // ۳) اگر جداول مشترک رسمی دانلود شد، جایگزین (نسخه جدیدتر ریپو)
+        if b, err := npvsGetBlob("tyboxes.bin", wbTableSize); err == nil {
+            for i := 0; i < 16; i++ {
+                for j := 0; j < 256; j++ {
+                    k := (i*256 + j) * 4
+                    wbTy[i][j] = binary.BigEndian.Uint32(b[k:])
+                }
+            }
+        }
+        if b, err := npvsGetBlob("mbl.bin", wbTableSize); err == nil {
+            for i := 0; i < 16; i++ {
+                for j := 0; j < 256; j++ {
+                    k := (i*256 + j) * 4
+                    wbMbl[i][j] = binary.BigEndian.Uint32(b[k:])
+                }
+            }
+        }
+        if b, err := npvsGetBlob("xor.bin", wbXorSize); err == nil {
+            wbXorBin = b
+        }
+
+        log.Printf("✅ جداول White-Box NPVS آماده (%d نسخه tboxes_last)", len(wbTlastVariants))
     })
     return wbErr
 }
@@ -392,6 +429,7 @@ func wbCTR(nonce, ct []byte, tlast *[16][256]byte) []byte {
     return out
 }
 
+// KDK = SHA256("npvtunnel/appkey/v1 " + WB-CTR(salt, 16 بایت صفر)) — برای هر نسخه tboxes_last
 func custodianKDKs(salt []byte) [][]byte {
     if len(salt) < 16 || loadWB() != nil {
         return nil
@@ -399,7 +437,7 @@ func custodianKDKs(salt []byte) [][]byte {
     material := make([]byte, 32)
     copy(material, salt[:16])
     var kdks [][]byte
-    for _, tlast := range []*[16][256]byte{&wbTlastV1, &wbTlastV2} {
+    for _, tlast := range wbTlastVariants {
         stream := wbCTR(material[:16], material[16:], tlast)
         sum := sha256.Sum256(append(append([]byte{}, wbKdfPrefix...), stream...))
         kdks = append(kdks, sum[:])
@@ -430,7 +468,7 @@ func npvsUnwrapAppKey(a *npvsAppKeyWrap) ([]byte, error) {
             return dek, nil
         }
     }
-    return nil, fmt.Errorf("هیچ کلید custodian جواب نداد (keyId %d)", a.KeyID)
+    return nil, fmt.Errorf("هیچ کلید custodian جواب نداد (keyId %d — %d کلید امتحان شد)", a.KeyID, len(kdks))
 }
 
 func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error) {
@@ -459,14 +497,22 @@ func npvsUnwrapPassphrase(p *npvsPassphraseWrap, password string) ([]byte, error
     return dek, nil
 }
 
+// چند کاندید بدنه: کامل / بدون ۴ بایت طول اول / بدون ۶۴ بایت امضا آخر / بدون هر دو
 func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
     if len(body) < 16 {
         return nil, fmt.Errorf("بدنه فایل ناقص است")
     }
     bodies := [][]byte{body}
-    if len(body) > 80 {
+    if len(body) > 68 {
         bodies = append(bodies, body[:len(body)-64])
     }
+    if len(body) > 20 {
+        bodies = append(bodies, body[4:])
+    }
+    if len(body) > 72 {
+        bodies = append(bodies, body[4:len(body)-64])
+    }
+
     nonces := [][]byte{}
     if len(nonce) == 12 {
         nonces = append(nonces, nonce)
@@ -474,16 +520,20 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
     var zero12 [12]byte
     nonces = append(nonces, zero12[:])
 
+    aads := [][]byte{nil}
+    if len(aad) > 0 {
+        aads = [][]byte{aad, nil}
+    }
+
     var lastErr error
     for _, n := range nonces {
         for _, ct := range bodies {
-            if pt, err := npvsChachaOpen(dek, n, ct, aad); err == nil {
-                return pt, nil
-            } else {
+            for _, ad := range aads {
+                pt, err := npvsChachaOpen(dek, n, ct, ad)
+                if err == nil {
+                    return pt, nil
+                }
                 lastErr = err
-            }
-            if pt, err := npvsChachaOpen(dek, n, ct, nil); err == nil {
-                return pt, nil
             }
         }
     }
@@ -543,6 +593,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, err, false
     }
 
+    // ۱) رمز دلخواه → بپرس
     if env.hdr.Passphrase != nil {
         setPendingPass(chatID, "npvs", data)
         if hint := npvsCreatorMessage(&env.hdr); hint != "" {
@@ -553,47 +604,60 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 
     res := &processResult{}
 
+    // ۲) appKey → باز کردن کامل
     if env.hdr.AppKey != nil {
-        if dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey); uerr == nil {
+        dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
+        if uerr == nil {
             pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
-            if berr != nil {
-                return nil, fmt.Errorf("قفل باز شد ولی بدنه ناقص است — فایل را «آپلود» کنید: %v", berr), false
+            if berr == nil {
+                text := decodeNpvSentinels(string(pt))
+                consumeJSONBlob([]byte(text), res)
+                if uris := scanPlainURIs([]byte(text)); len(uris) > 0 {
+                    res.URIs = append(res.URIs, uris...)
+                }
+                res.URIs = dedupe(res.URIs)
+                if len(res.URIs) == 0 && len(res.Raw) == 0 && len(text) > 0 {
+                    res.Raw = append(res.Raw, text)
+                }
+                return res, nil, false
             }
-            text := decodeNpvSentinels(string(pt))
-            consumeJSONBlob([]byte(text), res)
-            if uris := scanPlainURIs([]byte(text)); len(uris) > 0 {
-                res.URIs = append(res.URIs, uris...)
-            }
-            res.URIs = dedupe(res.URIs)
-            if len(res.URIs) == 0 && len(res.Raw) == 0 && len(text) > 0 {
-                res.Raw = append(res.Raw, text)
-            }
-            return res, nil, false
-        } else {
             var sb strings.Builder
             sb.WriteString("═══ NPVS ═══\n")
             sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
-            if msg := npvsCreatorMessage(&env.hdr); msg != "" {
-                sb.WriteString(fmt.Sprintf("پیام سازنده: %s\n", msg))
-            }
-            sb.WriteString("\n⚠️ " + uerr.Error())
+            sb.WriteString("🔓 قفل appKey باز شد ولی بدنه باز نشد.\n")
+            sb.WriteString("⚠️ " + berr.Error())
             res.Raw = append(res.Raw, sb.String())
             return res, nil, false
         }
+
+        var sb strings.Builder
+        sb.WriteString("═══ NPVS ═══\n")
+        sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
+        if msg := npvsCreatorMessage(&env.hdr); msg != "" {
+            sb.WriteString(fmt.Sprintf("پیام سازنده: %s\n", msg))
+        }
+        sb.WriteString("\n⚠️ قفل appKey: " + uerr.Error())
+        res.Raw = append(res.Raw, sb.String())
+        return res, nil, false
     }
 
+    // ۳) بدون قفل شناخته‌شده
     var sb strings.Builder
     sb.WriteString("═══ NPVS ═══\n")
     sb.WriteString(fmt.Sprintf("Config ID: %s\n", env.hdr.ConfigID))
+    if msg := npvsCreatorMessage(&env.hdr); msg != "" {
+        sb.WriteString(fmt.Sprintf("پیام سازنده: %s\n", msg))
+    }
     if len(env.hdr.Recipients) > 0 {
         sb.WriteString("\n🔒 فایل برای گیرندگان خاص (E2E) رمز شده — فقط با کلید خصوصی گیرنده باز می‌شود.")
     } else {
-        sb.WriteString("\n📡 روش باز کردن شناخته‌شده‌ای در این فایل نیست.")
+        sb.WriteString("\n📡 این فایل فقط شناسه ارجاع است — کانفیگ روی سرور سازنده نگه‌داری می‌شود.")
     }
     res.Raw = append(res.Raw, sb.String())
     return res, nil, false
 }
 
+// رمز → باز کردن NPVS (نسخه‌های مختلف رمز هم امتحان می‌شود: با فاصله، بدون فاصله، کوچک/بزرگ)
 func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error) {
     env, err := parseNpvsEnvelope(fileData)
     if err != nil {
@@ -602,10 +666,30 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
     if env.hdr.Passphrase == nil {
         return nil, fmt.Errorf("این فایل رمز شخصی ندارد")
     }
-    dek, err := npvsUnwrapPassphrase(env.hdr.Passphrase, password)
-    if err != nil {
-        return nil, err
+
+    attempts := []string{password}
+    trimmed := strings.TrimSpace(password)
+    attempts = append(attempts, trimmed)
+    attempts = append(attempts, strings.Join(strings.Fields(trimmed), ""))
+    attempts = append(attempts, strings.ToUpper(strings.Join(strings.Fields(trimmed), "")))
+    attempts = append(attempts, strings.ToLower(strings.Join(strings.Fields(trimmed), "")))
+    seen := map[string]bool{}
+
+    var dek []byte
+    for _, pwd := range attempts {
+        if pwd == "" || seen[pwd] {
+            continue
+        }
+        seen[pwd] = true
+        if d, uerr := npvsUnwrapPassphrase(env.hdr.Passphrase, pwd); uerr == nil {
+            dek = d
+            break
+        }
     }
+    if dek == nil {
+        return nil, fmt.Errorf("رمز اشتباه است — همان رمزی که سازنده اعلام کرده را بفرستید")
+    }
+
     pt, err := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
     if err != nil {
         return nil, err
