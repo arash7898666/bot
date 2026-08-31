@@ -498,7 +498,7 @@ type npvsHeader struct {
     Policy     struct {
         DisplayMessage      string  `json:"displayMessage"`
         CustomServerMessage string  `json:"customServerMessage"`
-        ExpiresAt           *string `json:"expiresAt"
+        ExpiresAt           *string `json:"expiresAt"`
     } `json:"policy"`
     Recipients []json.RawMessage `json:"recipients"`
 }
