@@ -21,12 +21,11 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.3-NPVS-FULL"
+const botVersion = "7.4-NPVS-LINKS"
 
 const (
-    msgLimit    = 3900
-    maxChunks   = 3
-    procTimeout = 120 * time.Second
+    msgLimit  = 3900
+    maxChunks = 40 // تا ۴۰ پیام — عملاً همه خروجی‌ها به‌صورت پیام می‌آیند نه فایل
 )
 
 var (
@@ -475,6 +474,7 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
+    // ─── خروجی: همیشه به‌صورت پیام تلگرام (تکه‌تکه) ───
     var lines []string
     for i, u := range res.URIs {
         if i > 0 {
@@ -485,7 +485,6 @@ func handleMessage(msg *tgbotapi.Message) {
     for _, r := range res.Raw {
         lines = append(lines, "", "─────── RAW ───────", r)
     }
-    content := strings.Join(lines, "\n")
 
     summary := fmt.Sprintf("✅ %d کانفیگ استخراج شد", len(res.URIs))
     if len(res.Raw) > 0 {
@@ -499,28 +498,16 @@ func handleMessage(msg *tgbotapi.Message) {
     }
     summary += "\n🤖 نسخه " + botVersion
 
-    kb := buildCopyKeyboard(res.URIs)
+    reply(chatID, summary)
+    replyLines(chatID, lines)
 
-    switch {
-    case len(content) <= msgLimit:
-        if kb != nil {
-            m := tgbotapi.NewMessage(chatID, summary+"\n\n"+content)
-            m.DisableWebPagePreview = true
-            m.ReplyMarkup = kb
-            if _, err := bot.Send(m); err != nil {
-                reply(chatID, summary+"\n\n"+content)
-            }
-        } else {
-            reply(chatID, summary+"\n\n"+content)
-        }
-    case len(content) <= maxChunks*msgLimit:
-        reply(chatID, summary)
-        replyLines(chatID, lines)
-    default:
-        reply(chatID, summary)
-        sendAction(chatID, tgbotapi.ChatUploadDocument)
-        if err := sendDocument(chatID, name+"_configs.txt", []byte(content)); err != nil {
-            reply(chatID, "❌ ارسال فایل ناموفق بود: "+err.Error())
+    // اگر RAW خیلی بزرگ بود (> ۲۰ پیام)، فقط آن بخش فایل می‌شود تا اسپم نشود
+    total := len(res.Raw)
+    if total > 0 {
+        rawOnly := strings.Join(res.Raw, "\n\n")
+        if len(rawOnly) > maxChunks*msgLimit {
+            sendAction(chatID, tgbotapi.ChatUploadDocument)
+            _ = sendDocument(chatID, name+"_raw.txt", []byte(rawOnly))
         }
     }
 }
@@ -530,25 +517,6 @@ func deleteProgress(chatID int64, msgID int) {
         return
     }
     _, _ = bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
-}
-
-func buildCopyKeyboard(uris []string) *tgbotapi.InlineKeyboardMarkup {
-    if len(uris) == 0 || len(uris) > 2 {
-        return nil
-    }
-    for _, u := range uris {
-        if len(u) > 250 {
-            return nil
-        }
-    }
-    var rows [][]tgbotapi.InlineKeyboardButton
-    for _, u := range uris {
-        rows = append(rows, tgbotapi.NewInlineKeyboardRow(
-            tgbotapi.NewInlineKeyboardButtonSwitch("📋 کپی کانفیگ", u),
-        ))
-    }
-    kb := tgbotapi.NewInlineKeyboardMarkup(rows...)
-    return &kb
 }
 
 // ═══════════════════ جوین اجباری ═══════════════════
@@ -682,6 +650,7 @@ func downloadFile(fileID string) ([]byte, error) {
     return io.ReadAll(resp.Body)
 }
 
+// ارسال تکه‌تکه‌ی خطوط — همه خروجی‌ها به‌صورت پیام
 func replyLines(chatID int64, lines []string) {
     var cur []string
     size := 0
@@ -1271,6 +1240,21 @@ func ctrIncrement(counter *[16]byte) {
 
 // ═══════════════════ پیمایش JSON ═══════════════════
 
+// cleanEmbeddedJSON: رشته‌ی JSON چندخطی را برای پارس آماده می‌کند
+// خطوط جدید واقعی و escape شده (\n) + تب‌ها حذف می‌شوند
+func cleanEmbeddedJSON(c string) []byte {
+    c = strings.ReplaceAll(c, "\\n", "")
+    c = strings.ReplaceAll(c, "\\r", "")
+    c = strings.ReplaceAll(c, "\\t", "")
+    c = strings.Map(func(r rune) rune {
+        if r == '\n' || r == '\r' || r == '\t' {
+            return -1
+        }
+        return r
+    }, c)
+    return []byte(strings.TrimSpace(c))
+}
+
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
@@ -1278,7 +1262,7 @@ func walkJSON(v any, uris *[]string) {
             switch c := raw.(type) {
             case string:
                 if c != "" {
-                    if u, err := extractURIsFromConfig([]byte(c)); err == nil {
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                         *uris = append(*uris, u...)
                     }
                 }
@@ -1293,7 +1277,7 @@ func walkJSON(v any, uris *[]string) {
             switch c := raw.(type) {
             case string:
                 if c != "" {
-                    if u, err := extractURIsFromConfig([]byte(c)); err == nil {
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
                         *uris = append(*uris, u...)
                     }
                 }
@@ -1834,7 +1818,7 @@ func extractFromV2rayProfile(b []byte) ([]string, error) {
     }
 
     if p.V2rayJson != "" {
-        if u, err := extractURIsFromConfig([]byte(p.V2rayJson)); err == nil && len(u) > 0 {
+        if u, err := extractURIsFromConfig(cleanEmbeddedJSON(p.V2rayJson)); err == nil && len(u) > 0 {
             return u, nil
         }
     }
