@@ -21,11 +21,11 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "7.0-LIGHT-OPT"
+const botVersion = "7.3-NPVS-FULL"
 
 const (
-    msgLimit   = 3900
-    maxChunks  = 3
+    msgLimit    = 3900
+    maxChunks   = 3
     procTimeout = 120 * time.Second
 )
 
@@ -131,7 +131,7 @@ func channelStatus() string {
     return settings.ForceChannel
 }
 
-// ═══════════════════ کش عضویت کانال (۵ دقیقه، فقط مثبت) ═══════════════════
+// ═══════════════════ کش عضویت کانال ═══════════════════
 
 type memberCacheEntry struct {
     until time.Time
@@ -247,7 +247,7 @@ func main() {
 
     loadState()
     startStatsFlusher()
-    startBundleReaper()
+    startPassReaper()
 
     var err error
     bot, err = tgbotapi.NewBotAPI(token)
@@ -342,17 +342,24 @@ func handleMessage(msg *tgbotapi.Message) {
         return
     }
 
-    // ─── بررسی باندل رمزدار در انتظار ───
+    // ─── بررسی فایل رمزدار در انتظار (SlipNet / NPVS) ───
     if strings.TrimSpace(msg.Text) != "" {
-        if bd, found, expired := takePendingBundle(chatID); found || expired {
+        if kind, fd, found, expired := takePendingPass(chatID); found || expired {
             if expired {
-                reply(chatID, "⏰ مهلت ارسال رمز به پایان رسید.\n\n🔑 فایل را دوباره بفرستید و این‌بار سریع‌تر رمز را ارسال کنید.")
+                reply(chatID, "⏰ مهلت ارسال رمز به پایان رسید.\n\n🔑 فایل را دوباره بفرستید.")
                 return
             }
             sendAction(chatID, tgbotapi.ChatTyping)
-            bres, berr := trySlipnetBundleDecrypt(bd, strings.TrimSpace(msg.Text))
+            var bres *processResult
+            var berr error
+            if kind == "npvs" {
+                bres, berr = tryNPVSPassphrase(fd, strings.TrimSpace(msg.Text))
+            } else {
+                bres, berr = trySlipnetBundleDecrypt(fd, strings.TrimSpace(msg.Text))
+            }
             if berr != nil {
-                reply(chatID, "❌ "+berr.Error()+"\n\n🔑 رمز اشتباه بود. فایل را دوباره بفرستید و رمز صحیح را ارسال کنید.")
+                setPendingPass(chatID, kind, fd)
+                reply(chatID, "❌ "+berr.Error()+"\n\n🔑 دوباره رمز را بفرستید، یا فایل را از نو ارسال کنید.")
             } else {
                 sendBundleResult(chatID, bres)
             }
@@ -450,7 +457,7 @@ func handleMessage(msg *tgbotapi.Message) {
     deleteProgress(chatID, progMsgID)
 
     if out.needPwd {
-        reply(chatID, "🔐 این فایل SlipNet یک باندل رمزدار است!\n\n🔑 لطفاً رمز (Password) فایل را همین حالا به‌صورت یک پیام بفرستید:")
+        reply(chatID, "🔐 این فایل با رمز محافظت شده است!\n\n🔑 لطفاً رمز (Passphrase) آن را همین حالا به‌صورت یک پیام بفرستید:")
         return
     }
     if out.err != nil {
@@ -525,7 +532,6 @@ func deleteProgress(chatID int64, msgID int) {
     _, _ = bot.Request(tgbotapi.NewDeleteMessage(chatID, msgID))
 }
 
-// دکمه «📋 کپی» فقط برای ۱ تا ۲ کانفیگ کوتاه
 func buildCopyKeyboard(uris []string) *tgbotapi.InlineKeyboardMarkup {
     if len(uris) == 0 || len(uris) > 2 {
         return nil
@@ -714,6 +720,7 @@ func formatsText() string {
     return `📋 <b>فرمت‌های ورودی پشتیبانی‌شده:</b>
 
 <code>.npvt</code> — NapsternetV
+<code>.npvs</code> — NapsternetV نسخه جدید (+ رمزدار)
 <code>.ehi</code> — HTTP Injector
 <code>.hat</code> — HA Tunnel Plus
 <code>.happ</code> — Happ (+ لینک happ://)
