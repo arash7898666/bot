@@ -2,19 +2,11 @@ package main
 
 import (
     "bytes"
-    "compress/flate"
-    "compress/gzip"
-    "compress/zlib"
-    "crypto/aes"
-    "crypto/cipher"
     "crypto/sha256"
-    "crypto/sha512"
     "encoding/base64"
     "encoding/binary"
-    "encoding/hex"
     "encoding/json"
     "fmt"
-    "io"
     "log"
     "net/url"
     "os"
@@ -23,19 +15,12 @@ import (
     "sync"
     "time"
 
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
-    "github.com/vmihailenco/msgpack/v5"
-    "golang.org/x/crypto/argon2"
-    "golang.org/x/crypto/chacha20"
     "golang.org/x/crypto/chacha20poly1305"
     "golang.org/x/crypto/pbkdf2"
-    "golang.org/x/crypto/scrypt"
 )
 
 const npvsWrapSize = 60
-const npvsEngine = "NPVS Engine v5.5"
-
-const npvsMaxVersion = 5
+const npvsEngine = "NPVS Engine v4"
 
 // ═══════════════════ رمزهای در انتظار ═══════════════════
 
@@ -46,7 +31,6 @@ type pendingPassEntry struct {
 }
 
 var pendingPass sync.Map
-
 const pendingPassTTL = 10 * time.Minute
 
 func setPendingPass(chatID int64, kind string, data []byte) {
@@ -171,6 +155,8 @@ func normalizeAddr(addr, port string) (string, string) {
     return addr, port
 }
 
+// 🔒 اولویت ۱: پیام دیباگ فقط وقتی DEBUG=1 فعال است
+// (در حالت عادی هیچ داده‌ای از کانفیگ لو نمی‌رود)
 func debugModeEnabled() bool {
     return os.Getenv("DEBUG") == "1"
 }
@@ -202,6 +188,7 @@ func npvsDebugInfo(pt []byte) string {
     return sb.String()
 }
 
+// پیام جایگزین بدون لو دادن داده
 func npvsNoLinkMessage() string {
     return "🔧 " + npvsEngine + "\n⚠️ متن رمزگشایی شد ولی کانفیگ قابل شناسایی نبود.\n💡 اگر فایل معتبر است با سازنده چک کنید."
 }
@@ -523,246 +510,12 @@ type npvsEnvelope struct {
     body      []byte
 }
 
-// ═══════════════════ 🐞 دیباگ ═══════════════════
-
-type npvsParseError struct {
-    msg   string
-    debug string
-}
-
-func (e *npvsParseError) Error() string { return e.msg + "\n\n" + e.debug }
-
-func npvsEnvelopeHollow(e *npvsEnvelope) bool {
-    return e.hdr.ConfigID == "" && e.hdr.Passphrase == nil &&
-        e.hdr.AppKey == nil && len(e.hdr.Recipients) == 0
-}
-
-func npvsAsciiRuns(b []byte, minLen, maxRuns int) []string {
-    var runs []string
-    start := -1
-    for i := 0; i <= len(b); i++ {
-        if i < len(b) && b[i] >= 0x20 && b[i] < 0x7f {
-            if start < 0 {
-                start = i
-            }
-        } else {
-            if start >= 0 && i-start >= minLen {
-                runs = append(runs, fmt.Sprintf("@0x%x: %q", start, string(b[start:i])))
-                if len(runs) >= maxRuns {
-                    return runs
-                }
-            }
-            start = -1
-        }
-    }
-    return runs
-}
-
-func npvsDebugDump(b []byte) string {
-    ver, hdrLen := -1, -1
-    if len(b) >= 9 {
-        ver = int(b[4])
-        hdrLen = int(binary.BigEndian.Uint32(b[5:9]))
-    }
-    var sb strings.Builder
-    sb.WriteString("🐞 NPVS DEBUG\n━━━━━━━━━━━━━━\n")
-    fmt.Fprintf(&sb, "size=%d ver=%d hdrLen=%d\n", len(b), ver, hdrLen)
-
-    if hdrLen > 2 && 9+hdrLen <= len(b) {
-        hdr := b[9 : 9+hdrLen]
-        pr := 0
-        for _, c := range hdr {
-            if c >= 0x20 && c < 0x7f {
-                pr++
-            }
-        }
-        fmt.Fprintf(&sb, "header printable=%.0f%% (≈37%% = encrypted)\n",
-            100*float64(pr)/float64(len(hdr)))
-
-        off := 9 + hdrLen
-        if off+16 <= len(b) {
-            bodyLen := int(binary.BigEndian.Uint32(b[off+12 : off+16]))
-            expect := len(b) - 9 - hdrLen - 16 - 64
-            fmt.Fprintf(&sb, "nonce@%d bodyLen=%d (expected=%d) exactFit=%v\n",
-                off, bodyLen, expect, off+16+bodyLen+64 == len(b))
-        }
-        if 9+96 <= len(b) {
-            sb.WriteString("hdr[0:96]:\n" + hex.EncodeToString(b[9:9+96]) + "\n")
-        }
-    }
-
-    sb.WriteString("ascii-runs(≥6):\n")
-    for _, r := range npvsAsciiRuns(b, 6, 40) {
-        sb.WriteString("  " + r + "\n")
-    }
-
-    t := 80
-    if t > len(b) {
-        t = len(b)
-    }
-    sb.WriteString("tail80:\n" + hex.EncodeToString(b[len(b)-t:]) + "\n")
-    return sb.String()
-}
-
-func npvsHexdump(b []byte, width int) string {
-    var sb strings.Builder
-    for i := 0; i < len(b); i += width {
-        end := i + width
-        if end > len(b) {
-            end = len(b)
-        }
-        fmt.Fprintf(&sb, "%06x %s\n", i, hex.EncodeToString(b[i:end]))
-    }
-    return sb.String()
-}
-
-func sendNPVSDebugDump(chatID int64, data []byte) {
-    doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
-        Name:  "npvs_v5_dump.txt",
-        Bytes: []byte(npvsHexdump(data, 32)),
-    })
-    if _, err := bot.Send(doc); err != nil {
-        log.Printf("[NPVS] send dump failed: %v", err)
-    }
-}
-
-// ═══════════════════ decompress / انکودینگ هدر ═══════════════════
-
-func npvsTryDecompress(b []byte) ([]byte, bool) {
-    if len(b) < 2 {
-        return nil, false
-    }
-    limit := int64(8 << 20)
-
-    if r, err := zlib.NewReader(bytes.NewReader(b)); err == nil {
-        if out, err := io.ReadAll(io.LimitReader(r, limit)); err == nil && len(out) > 0 {
-            return out, true
-        }
-    }
-    if r, err := gzip.NewReader(bytes.NewReader(b)); err == nil {
-        if out, err := io.ReadAll(io.LimitReader(r, limit)); err == nil && len(out) > 0 {
-            return out, true
-        }
-    }
-    fr := flate.NewReader(bytes.NewReader(b))
-    if out, err := io.ReadAll(io.LimitReader(fr, limit)); err == nil && len(out) > 0 {
-        return out, true
-    }
-    return nil, false
-}
-
-func npvsHeaderJSON(raw []byte) ([]byte, bool) {
-    if json.Valid(raw) {
-        return raw, true
-    }
-
-    var m map[string]any
-    if err := msgpack.Unmarshal(raw, &m); err == nil && len(m) > 0 {
-        if jb, jerr := json.Marshal(m); jerr == nil {
-            return jb, true
-        }
-    }
-    if len(raw) > 1 {
-        var m2 map[string]any
-        if err := msgpack.Unmarshal(raw[1:], &m2); err == nil && len(m2) > 0 {
-            if jb, jerr := json.Marshal(m2); jerr == nil {
-                return jb, true
-            }
-        }
-    }
-
-    for _, off := range []int{1, 2, 4, 8} {
-        if len(raw) > off && raw[off] == '{' && json.Valid(raw[off:]) {
-            return raw[off:], true
-        }
-    }
-
-    cands := [][]byte{raw}
-    if len(raw) > 1 {
-        cands = append(cands, raw[1:])
-    }
-    if len(raw) > 2 {
-        cands = append(cands, raw[2:])
-    }
-    for _, c := range cands {
-        if dec, ok := npvsTryDecompress(c); ok && json.Valid(dec) {
-            return dec, true
-        }
-    }
-
-    s := strings.TrimSpace(strings.Join(strings.Fields(string(raw)), ""))
-    if len(s) > 8 {
-        padded := s
-        if m3 := len(padded) % 4; m3 != 0 {
-            padded += strings.Repeat("=", 4-m3)
-        }
-        if dec, err := base64.StdEncoding.DecodeString(padded); err == nil && json.Valid(dec) {
-            return dec, true
-        }
-        if dec, err := base64.URLEncoding.DecodeString(padded); err == nil && json.Valid(dec) {
-            return dec, true
-        }
-    }
-    return nil, false
-}
-
-func npvsPlaintext(pt []byte) []byte {
-    if isMostlyPrintable(pt) {
-        return pt
-    }
-    if dec, ok := npvsTryDecompress(pt); ok && isMostlyPrintable(dec) {
-        return dec
-    }
-    return pt
-}
-
-// ═══════════════════ پارسر envelope ═══════════════════
-
-func balancedJSONEnd(b []byte, start int) int {
-    depth, inStr, esc := 0, false, false
-    for i := start; i < len(b); i++ {
-        c := b[i]
-        if esc {
-            esc = false
-            continue
-        }
-        if c == '\\' {
-            esc = true
-            continue
-        }
-        if c == '"' {
-            inStr = !inStr
-            continue
-        }
-        if inStr {
-            continue
-        }
-        if c == '{' {
-            depth++
-        } else if c == '}' {
-            depth--
-            if depth == 0 {
-                return i
-            }
-        }
-    }
-    return -1
-}
-
 func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
-    if len(b) < 16 || !bytes.HasPrefix(b, []byte("NPVS")) {
-        return nil, &npvsParseError{msg: "ساختار NPVS شناخته نشد (magic)", debug: npvsDebugDump(b)}
-    }
-    ver := int(b[4])
-    hdrLen := -1
-    if len(b) >= 9 {
-        hdrLen = int(binary.BigEndian.Uint32(b[5:9]))
-    }
-
-    if len(b) >= 89 && ver <= npvsMaxVersion && hdrLen > 2 && 9+hdrLen < len(b) {
-        e := &npvsEnvelope{headerRaw: b[9 : 9+hdrLen]}
-        if hdrJSON, ok := npvsHeaderJSON(e.headerRaw); ok {
-            if err := json.Unmarshal(hdrJSON, &e.hdr); err == nil && !npvsEnvelopeHollow(e) {
+    if len(b) >= 89 && bytes.HasPrefix(b, []byte("NPVS")) && b[4] <= 1 {
+        hdrLen := int(binary.BigEndian.Uint32(b[5:9]))
+        if hdrLen > 2 && 9+hdrLen < len(b) {
+            e := &npvsEnvelope{headerRaw: b[9 : 9+hdrLen]}
+            if err := json.Unmarshal(e.headerRaw, &e.hdr); err == nil {
                 off := 9 + hdrLen
                 if off+16 <= len(b) {
                     e.nonce = b[off : off+12]
@@ -781,38 +534,51 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         }
     }
 
-    tried := 0
-    for i := bytes.IndexByte(b, '{'); i >= 0 && i < len(b)-10 && tried < 60; {
-        tried++
-        var next int = -1
-        if n := bytes.IndexByte(b[i+1:], '{'); n >= 0 {
-            next = i + 1 + n
-        }
-        if end := balancedJSONEnd(b, i); end > i {
-            e := &npvsEnvelope{headerRaw: b[i : end+1]}
-            if hdrJSON, ok := npvsHeaderJSON(e.headerRaw); ok {
-                if err := json.Unmarshal(hdrJSON, &e.hdr); err == nil && !npvsEnvelopeHollow(e) {
+    if bytes.HasPrefix(b, []byte("NPVS")) {
+        start := bytes.IndexByte(b, '{')
+        if start > 4 {
+            depth, inStr, esc, end := 0, false, false, -1
+            for i := start; i < len(b); i++ {
+                c := b[i]
+                if esc {
+                    esc = false
+                    continue
+                }
+                if c == '\\' {
+                    esc = true
+                    continue
+                }
+                if c == '"' {
+                    inStr = !inStr
+                    continue
+                }
+                if inStr {
+                    continue
+                }
+                if c == '{' {
+                    depth++
+                } else if c == '}' {
+                    depth--
+                    if depth == 0 {
+                        end = i
+                        break
+                    }
+                }
+            }
+            if end > start {
+                e := &npvsEnvelope{headerRaw: b[start : end+1]}
+                if err := json.Unmarshal(e.headerRaw, &e.hdr); err == nil {
                     tail := b[end+1:]
                     if len(tail) >= 28 {
                         e.nonce = tail[:12]
                         e.body = tail[12:]
-                    } else if len(tail) > 16 {
-                        e.body = tail
                     }
                     return e, nil
                 }
             }
         }
-        i = next
     }
-
-    dbg := npvsDebugDump(b)
-    log.Printf("[NPVS] parse failed: ver=%d hdrLen=%d size=%d", ver, hdrLen, len(b))
-    msg := "ساختار NPVS شناخته نشد (هدر v5 احتمالاً رمزشده است)"
-    if ver > npvsMaxVersion {
-        msg = fmt.Sprintf("نسخه NPVS=%d پشتیبانی نمی‌شود", ver)
-    }
-    return nil, &npvsParseError{msg: msg, debug: dbg}
+    return nil, fmt.Errorf("ساختار NPVS شناخته نشد")
 }
 
 func npvsChachaOpen(key, nonce, ctTag, aad []byte) ([]byte, error) {
@@ -833,7 +599,7 @@ func npvsB64URL(s string) ([]byte, error) {
     return base64.URLEncoding.DecodeString(s)
 }
 
-// ═══════════════════ White-Box — ⚡ با کش کامل ═══════════════════
+// ═══════════════════ White-Box — ⚡ نسخه سریع با کش کامل ═══════════════════
 
 const wbTlastSize = 4096
 const wbTableSize = 16384
@@ -859,74 +625,50 @@ var npvsRepoBases = []string{
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@master/internal/modules/impl/assets/npvs/",
 }
 
+// 💾 باگ‌فیکس: کش کامل — همه فایل‌ها روی دیسک کش می‌شوند
+// بعد از ری‌استارت حتی بدون شبکه کار می‌کند
 func npvsGetBlob(name string, want int) []byte {
+    // ۱) کش دائمی روی دیسک (اولین اولویت — سریع‌ترین)
     cache := "npvs_cache_" + name
     if b, err := os.ReadFile(cache); err == nil && len(b) == want {
         return b
     }
 
+    // ۲) فایل‌های محلی در ریپو
     for _, p := range []string{os.Getenv("NPVS_DIR"), "npvs", "assets/npvs", "."} {
         if p == "" {
             continue
         }
         if b, err := os.ReadFile(p + "/" + name); err == nil && len(b) == want {
-            _ = os.WriteFile(cache, b, 0644)
+            _ = os.WriteFile(cache, b, 0644) // 💾 کش کن
             return b
         }
     }
 
+    // ۳) دانلود از گیت‌هاب
     for _, u := range npvsRepoBases {
         b, err := fetchURL(u + name)
         if err == nil && len(b) == want {
-            _ = os.WriteFile(cache, b, 0644)
+            _ = os.WriteFile(cache, b, 0644) // 💾 کش کن
             return b
         }
     }
     return nil
 }
 
-// 🔬 وکتورهای رسمی از تست Pantegnos — تأیید صحت جداول whitebox
-var wbTestSalt = []byte{0x84, 0x3c, 0xc2, 0xc9, 0x01, 0xce, 0x91, 0x51, 0x6c, 0x38, 0xcc, 0x66, 0x05, 0xb9, 0x2e, 0x47}
-
-var wbTestKDKs = [][32]byte{
-    {0xa9, 0xc9, 0x05, 0x8d, 0xca, 0x50, 0xd1, 0x78, 0xb6, 0x4e, 0x03, 0x18, 0xad, 0x53, 0x62, 0xbe, 0x8f, 0x8d, 0x41, 0x03, 0xdc, 0x83, 0xce, 0x2b, 0xd0, 0xcc, 0xd7, 0xe4, 0x04, 0x58, 0x4e, 0x3d},
-    {0x43, 0x8a, 0x04, 0xb5, 0x21, 0xa5, 0x95, 0x21, 0x56, 0x44, 0x1a, 0x76, 0xbe, 0xe5, 0xd8, 0x37, 0x7a, 0x67, 0x25, 0x7f, 0xf7, 0xe8, 0x29, 0x1b, 0x22, 0x00, 0x23, 0x61, 0x4d, 0x79, 0x33, 0xd5},
-}
-
-func npvsWBSelfTest() string {
-    kdks := custodianKDKs(wbTestSalt)
-    match := 0
-    for _, want := range wbTestKDKs {
-        for _, got := range kdks {
-            if bytes.Equal(got, want[:]) {
-                match++
-                break
-            }
-        }
-    }
-    var sb strings.Builder
-    fmt.Fprintf(&sb, "🧪 WB SelfTest: %d/2 KDK درست (variants=%d)", match, len(kdks))
-    for i, k := range kdks {
-        if i >= 4 {
-            break
-        }
-        h := hex.EncodeToString(k)
-        fmt.Fprintf(&sb, "\n   kdk[%d]=%s…", i, h[:16])
-    }
-    return sb.String()
-}
-
+// 💡 باگ‌فیکس: تابع عمومی برای پیش‌بارگذاری در زمان استارت
+// (دیگر کاربر اول منتظر نمی‌ماند)
 func preloadNPVS() {
     go func() {
         start := time.Now()
         loadWB()
-        log.Printf("⚡ جداول NPVS آماده شد (%v) | %s",
-            time.Since(start).Round(time.Millisecond), npvsWBSelfTest())
+        log.Printf("⚡ جداول NPVS از قبل آماده شد (%v)", time.Since(start).Round(time.Millisecond))
     }()
 }
 
 func loadWB() {
     wbOnce.Do(func() {
+        // جداول مشترک: اول کش، بعد محلی (tables_loader)، بعد گیت‌هاب
         if b := npvsGetBlob("tyboxes.bin", wbTableSize); b != nil {
             for i := 0; i < 16; i++ {
                 for j := 0; j < 256; j++ {
@@ -935,7 +677,7 @@ func loadWB() {
                 }
             }
         } else {
-            wbTy = tyBoxes
+            wbTy = tyBoxes // fallback از tables_loader
         }
 
         if b := npvsGetBlob("mbl.bin", wbTableSize); b != nil {
@@ -946,12 +688,13 @@ func loadWB() {
                 }
             }
         } else {
-            wbMbl = mbl
+            wbMbl = mbl // fallback
         }
 
         if b := npvsGetBlob("xor.bin", wbXorSize); b != nil {
             wbXorBin = b
         } else {
+            // ساخت از xorTable موجود
             wbXorBin = make([]byte, wbXorSize)
             for t := 0; t < 96; t++ {
                 for a := 0; a < 16; a++ {
@@ -1064,7 +807,7 @@ func custodianKDKs(salt []byte) [][]byte {
     return kdks
 }
 
-// ═══════════════════ باز کردن قفل‌ها (v1) ═══════════════════
+// ═══════════════════ باز کردن قفل‌ها ═══════════════════
 
 func npvsUnwrapAppKey(a *npvsAppKeyWrap) ([]byte, error) {
     if a.Kdf != "wbaes-ctr-sha256" {
@@ -1152,693 +895,11 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
     return nil, fmt.Errorf("بدنه باز نشد")
 }
 
-// ═══════ v5.5: نقشه + پروب بدون رمز + حمله تمام‌عیار ═══════
-
-type npvs5TLV struct {
-    ID   int
-    Data []byte
-}
-
-type npvs5FileMap struct {
-    Hdr       []byte
-    Salt      []byte
-    Nonce32   []byte
-    Block     []byte
-    BodyNonce []byte
-    Body      []byte
-    Prelude32 []byte
-    Records   []npvs5TLV
-}
-
-func npvs5MapFile(f []byte) (*npvs5FileMap, error) {
-    if len(f) < 120 || !bytes.HasPrefix(f, []byte("NPVS")) {
-        return nil, fmt.Errorf("فایل NPVS نیست")
-    }
-    hdrLen := int(binary.BigEndian.Uint32(f[5:9]))
-    if hdrLen < 50 || 9+hdrLen+16 > len(f) {
-        return nil, fmt.Errorf("فریمینگ v5 نامعتبر: hdrLen=%d", hdrLen)
-    }
-    m := &npvs5FileMap{Hdr: f[9 : 9+hdrLen]}
-    m.Salt = m.Hdr[33:49]
-    if len(m.Hdr) >= 132 {
-        m.Nonce32 = m.Hdr[100:132]
-    }
-    if len(m.Hdr) >= 138 {
-        m.Block = m.Hdr[137:]
-    }
-    off := 9 + hdrLen
-    m.BodyNonce = f[off : off+12]
-    bodyLen := int(binary.BigEndian.Uint32(f[off+12 : off+16]))
-    off += 16
-    if bodyLen < 16 || off+bodyLen > len(f) {
-        bodyLen = len(f) - off
-    }
-    m.Body = f[off : off+bodyLen]
-    if bytes.HasPrefix(m.Body, []byte("NPF")) && len(m.Body) >= 44 {
-        m.Prelude32 = m.Body[4:36]
-        roff := 38
-        for roff+6 <= len(m.Body) {
-            id := int(binary.BigEndian.Uint16(m.Body[roff : roff+2]))
-            ln := int(binary.BigEndian.Uint32(m.Body[roff+2 : roff+6]))
-            if id <= 0 || id > 0x4000 || ln <= 0 || roff+6+ln > len(m.Body) {
-                break
-            }
-            m.Records = append(m.Records, npvs5TLV{ID: id, Data: m.Body[roff+6 : roff+6+ln]})
-            roff += 6 + ln
-        }
-    }
-    return m, nil
-}
-
-func npvs5Analyze(m *npvs5FileMap) string {
-    var sb strings.Builder
-    sb.WriteString("🗺️ نقشه v5:\n")
-    fmt.Fprintf(&sb, "  salt=%x…\n", m.Salt[:6])
-    if len(m.Nonce32) >= 8 {
-        fmt.Fprintf(&sb, "  nonce32=%x…\n", m.Nonce32[:8])
-    }
-    if len(m.Prelude32) >= 8 {
-        fmt.Fprintf(&sb, "  prelude32=%x…\n", m.Prelude32[:8])
-    }
-    fmt.Fprintf(&sb, "  block=%d | NPF=%v | records=%d\n",
-        len(m.Block), bytes.HasPrefix(m.Body, []byte("NPF")), len(m.Records))
-    return sb.String()
-}
-
-// ─── ابزارهای رمز ───
-
-var npvs5IterCandidates = []int{600000, 310000, 100000, 10000, 1000, 100, 9, 1}
-
-func npvsAesGcmOpen(key, nonce, ct, aad []byte) ([]byte, error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return nil, err
-    }
-    gcm, err := cipher.NewGCM(block)
-    if err != nil {
-        return nil, err
-    }
-    return gcm.Open(nil, nonce, ct, aad)
-}
-
-// 🔧 AES-CTR به IV شانزده بایتی نیاز دارد → nonce را صفر-پد می‌کنیم
-func npvsAesCTRStream(key, nonce12, ct []byte) ([]byte, error) {
-    block, err := aes.NewCipher(key)
-    if err != nil {
-        return nil, err
-    }
-    iv := make([]byte, 16)
-    copy(iv, nonce12)
-    out := make([]byte, len(ct))
-    cipher.NewCTR(block, iv).XORKeyStream(out, ct)
-    return out, nil
-}
-
-func npvsChacha20Stream(key, nonce, ct []byte) ([]byte, error) {
-    s, err := chacha20.NewUnauthenticatedCipher(key, nonce)
-    if err != nil {
-        return nil, err
-    }
-    out := make([]byte, len(ct))
-    s.XORKeyStream(out, ct)
-    return out, nil
-}
-
-func npvs5LikelyConfig(pt []byte) bool {
-    if len(pt) < 12 {
-        return false
-    }
-    pr := 0
-    for _, c := range pt {
-        if (c >= 0x20 && c < 0x7f) || c == '\n' || c == '\r' || c == '\t' {
-            pr++
-        }
-    }
-    if float64(pr)/float64(len(pt)) < 0.95 {
-        return false
-    }
-    s := strings.ToLower(string(pt))
-    return strings.Contains(s, `"`) || strings.Contains(s, "{") ||
-        strings.Contains(s, "vless") || strings.Contains(s, "vmess") ||
-        strings.Contains(s, "trojan") || strings.Contains(s, "ss:")
-}
-
-type npvs5Key struct {
-    name string
-    key  []byte
-}
-
-var npvs5KdfCache sync.Map
-
-func npvs5DeriveKeys(pass string, salt []byte) []npvs5Key {
-    ck := pass + "\x00" + hex.EncodeToString(salt)
-    if v, ok := npvs5KdfCache.Load(ck); ok {
-        return v.([]npvs5Key)
-    }
-    var out []npvs5Key
-    pw := []byte(pass)
-    mk := func(name string, b []byte) { out = append(out, npvs5Key{name, b}) }
-
-    h := sha256.Sum256(append(append([]byte{}, pw...), salt...))
-    mk("sha256(pw|salt)", h[:])
-    h = sha256.Sum256(append(append([]byte{}, salt...), pw...))
-    mk("sha256(salt|pw)", h[:])
-    h = sha256.Sum256(pw)
-    mk("sha256(pw)", h[:])
-
-    for _, it := range npvs5IterCandidates {
-        mk(fmt.Sprintf("pbkdf2-%d", it), pbkdf2.Key(pw, salt, it, 32, sha256.New))
-    }
-    mk("pbkdf2s512-600k", pbkdf2.Key(pw, salt, 600000, 32, sha512.New))
-    mk("pbkdf2s512-100k", pbkdf2.Key(pw, salt, 100000, 32, sha512.New))
-    mk("argon2id-t1", argon2.IDKey(pw, salt, 1, 64*1024, 4, 32))
-    mk("argon2id-t3", argon2.IDKey(pw, salt, 3, 64*1024, 4, 32))
-    if k, err := scrypt.Key(pw, salt, 32768, 8, 1, 32); err == nil {
-        mk("scrypt-32k", k)
-    }
-    if k, err := scrypt.Key(pw, salt, 16384, 8, 1, 32); err == nil {
-        mk("scrypt-16k", k)
-    }
-
-    npvs5KdfCache.Store(ck, out)
-    return out
-}
-
-// ─── کاندیدها ───
-
-type npvs5Blob struct {
-    name string
-    data []byte
-}
-
-func npvs5SaltCandidates(m *npvs5FileMap) []npvs5Blob {
-    out := []npvs5Blob{{"salt16", m.Salt}}
-    if len(m.Prelude32) == 32 {
-        out = append(out,
-            npvs5Blob{"prelude32", m.Prelude32},
-            npvs5Blob{"pre32[:16]", m.Prelude32[:16]})
-    }
-    if len(m.Nonce32) >= 16 {
-        out = append(out, npvs5Blob{"n32[:16]", m.Nonce32[:16]})
-    }
-    if len(m.BodyNonce) == 12 {
-        out = append(out, npvs5Blob{"bodyNonce", m.BodyNonce})
-    }
-    return out
-}
-
-func npvs5NonceCandidates(m *npvs5FileMap) []npvs5Blob {
-    out := []npvs5Blob{{"zero", make([]byte, 12)}}
-    H := m.Hdr
-    cut := func(name string, b []byte) {
-        if len(b) >= 12 {
-            out = append(out, npvs5Blob{name, b[:12]})
-        }
-    }
-    cut("salt[:12]", m.Salt)
-    if len(m.Salt) >= 16 {
-        out = append(out, npvs5Blob{"salt[4:16]", m.Salt[4:16]})
-    }
-    cut("hdr49", H[49:])
-    cut("hdr53", H[53:])
-    cut("hdr33", H[33:])
-    cut("hdr37", H[37:])
-    if len(m.Nonce32) >= 32 {
-        out = append(out,
-            npvs5Blob{"n32[0:12]", m.Nonce32[0:12]},
-            npvs5Blob{"n32[8:20]", m.Nonce32[8:20]},
-            npvs5Blob{"n32[20:32]", m.Nonce32[20:32]})
-    }
-    if len(m.Prelude32) == 32 {
-        out = append(out,
-            npvs5Blob{"pre[0:12]", m.Prelude32[0:12]},
-            npvs5Blob{"pre[20:32]", m.Prelude32[20:32]})
-    }
-    cut("bodyNonce", m.BodyNonce)
-    cut("block[:12]", m.Block)
-    return out
-}
-
-// 🆕 کاندیدهای ciphertext — کل نواحی بزرگ هدر
-func npvs5CtCandidates(m *npvs5FileMap) []npvs5Blob {
-    var out []npvs5Blob
-    H := m.Hdr
-    add := func(name string, b []byte) {
-        if len(b) >= 28 {
-            out = append(out, npvs5Blob{name, b})
-        }
-    }
-    add("hdr49", H[49:])
-    add("hdr53", H[53:])
-    add("hdr61", H[61:])
-    add("hdr64", H[64:])
-    add("hdr65", H[65:])
-    add("hdr98", H[98:])
-    add("hdr100", H[100:])
-    add("hdr133", H[133:])
-    add("hdr137", H[137:])
-    add("hdr138", H[138:])
-    add("hdr141", H[141:])
-    if len(m.Block) > 1 {
-        add("block1", m.Block[1:])
-    }
-    return out
-}
-
-func npvs5AadCandidates(m *npvs5FileMap) [][]byte {
-    H := m.Hdr
-    aads := [][]byte{nil, m.Salt}
-    if len(H) >= 33 {
-        aads = append(aads, H[:33])
-    }
-    if len(H) >= 49 {
-        aads = append(aads, H[:49])
-    }
-    if len(H) >= 61 {
-        aads = append(aads, H[:61])
-    }
-    if len(H) >= 137 {
-        aads = append(aads, H[:137])
-    }
-    aads = append(aads, H)
-    return aads
-}
-
-// باز کردن بلوک هدر — تگ AEAD صحت را تضمین می‌کند
-func npvs5OpenBlock(pass string, m *npvs5FileMap) (pt []byte, key []byte, how string) {
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("[NPVS5] panic in OpenBlock: %v", r)
-            pt, key, how = nil, nil, ""
-        }
-    }()
-
-    aads := npvs5AadCandidates(m)
-    for _, sc := range npvs5SaltCandidates(m) {
-        for _, k := range npvs5DeriveKeys(pass, sc.data) {
-            // حالت A: Block = nonce12 + ct
-            if len(m.Block) >= 28 {
-                for _, ad := range aads {
-                    if p, err := npvsChachaOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
-                        return p, k.key, sc.name + "/" + k.name + "|chacha|A"
-                    }
-                    if p, err := npvsAesGcmOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
-                        return p, k.key, sc.name + "/" + k.name + "|aesgcm|A"
-                    }
-                }
-            }
-            // حالت B/D: همه ct × همه nonce
-            for _, cc := range npvs5CtCandidates(m) {
-                for _, nc := range npvs5NonceCandidates(m) {
-                    for _, ad := range aads {
-                        if p, err := npvsChachaOpen(k.key, nc.data, cc.data, ad); err == nil {
-                            return p, k.key, sc.name + "/" + k.name + "|chacha|ct=" + cc.name + "|n=" + nc.name
-                        }
-                        if p, err := npvsAesGcmOpen(k.key, nc.data, cc.data, ad); err == nil {
-                            return p, k.key, sc.name + "/" + k.name + "|aesgcm|ct=" + cc.name + "|n=" + nc.name
-                        }
-                    }
-                }
-            }
-            // حالت C: XChaCha
-            if len(m.Nonce32) >= 24 {
-                if xa, err := chacha20poly1305.NewX(k.key); err == nil {
-                    for _, n := range [][]byte{m.Nonce32[:24], m.Nonce32[8:32]} {
-                        for _, ad := range aads {
-                            if p, err := xa.Open(nil, n, m.Block, ad); err == nil {
-                                return p, k.key, sc.name + "/" + k.name + "|xchacha"
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    return nil, nil, ""
-}
-
-func npvs5FindDek(pt []byte) []byte {
-    var m map[string]any
-    if err := json.Unmarshal(pt, &m); err != nil {
-        return nil
-    }
-    for _, k := range []string{"dek", "cek", "key", "dekHex", "contentKey"} {
-        if v, ok := m[k].(string); ok && v != "" {
-            if b, err := hex.DecodeString(v); err == nil && len(b) == 32 {
-                return b
-            }
-            if b, err := npvsB64URL(v); err == nil && len(b) == 32 {
-                return b
-            }
-        }
-    }
-    return nil
-}
-
-func npvsOpenBodyMulti(dek, nonce, body []byte, extraAads [][]byte) ([]byte, error) {
-    if len(body) < 16 {
-        return nil, fmt.Errorf("بدنه ناقص")
-    }
-    bodies := [][]byte{body}
-    if len(body) > 68 {
-        bodies = append(bodies, body[:len(body)-64])
-    }
-    if len(body) > 20 {
-        bodies = append(bodies, body[4:])
-    }
-    nonces := [][]byte{}
-    if len(nonce) == 12 {
-        nonces = append(nonces, nonce)
-    }
-    var zero12 [12]byte
-    nonces = append(nonces, zero12[:])
-    aads := append([][]byte{nil}, extraAads...)
-    for _, n := range nonces {
-        for _, ct := range bodies {
-            for _, ad := range aads {
-                if pt, err := npvsChachaOpen(dek, n, ct, ad); err == nil {
-                    return pt, nil
-                }
-                if pt, err := npvsAesGcmOpen(dek, n, ct, ad); err == nil {
-                    return pt, nil
-                }
-            }
-        }
-    }
-    return nil, fmt.Errorf("بدنه باز نشد")
-}
-
-func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (txt string, how string) {
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("[NPVS5] panic in RecordSchemes: %v", r)
-            txt, how = "", ""
-        }
-    }()
-
-    if len(m.Records) == 0 {
-        return "", ""
-    }
-    nTest := len(m.Records)
-    if nTest > 3 {
-        nTest = 3
-    }
-
-    tryOpen := func(key, nonce, ct, ad []byte) ([]byte, bool) {
-        if len(ct) < 16 || len(nonce) != 12 {
-            return nil, false
-        }
-        if pt, err := npvsChachaOpen(key, nonce, ct, ad); err == nil {
-            return pt, true
-        }
-        if pt, err := npvsAesGcmOpen(key, nonce, ct, ad); err == nil {
-            return pt, true
-        }
-        if pt, err := npvsChacha20Stream(key, nonce, ct); err == nil && npvs5LikelyConfig(pt) {
-            return pt, true
-        }
-        return nil, false
-    }
-
-    idAad := func(id int) []byte { return []byte{byte(id >> 8), byte(id)} }
-    nonces := npvs5NonceCandidates(m)
-    collect := func(run func(r npvs5TLV) ([]byte, bool)) (string, int) {
-        var sb strings.Builder
-        ok := 0
-        for _, r := range m.Records {
-            if pt, hit := run(r); hit {
-                ok++
-                sb.Write(pt)
-                sb.WriteString("\n")
-            }
-        }
-        return sb.String(), ok
-    }
-
-    for _, k := range keys {
-        for _, nc := range nonces {
-            for _, useID := range []bool{false, true} {
-                hits := 0
-                for _, r := range m.Records[:nTest] {
-                    ad := []byte(nil)
-                    if useID {
-                        ad = idAad(r.ID)
-                    }
-                    if _, ok := tryOpen(k.key, nc.data, r.Data, ad); ok {
-                        hits++
-                    }
-                }
-                if hits >= nTest-1 && hits > 0 {
-                    t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
-                        ad := []byte(nil)
-                        if useID {
-                            ad = idAad(r.ID)
-                        }
-                        return tryOpen(k.key, nc.data, r.Data, ad)
-                    })
-                    if okCount > 0 {
-                        name := k.name + "/" + nc.name
-                        if useID {
-                            name += "/aad=id"
-                        }
-                        return t, fmt.Sprintf("%s: %d/%d", name, okCount, len(m.Records))
-                    }
-                }
-            }
-        }
-    }
-
-    idNonce := func(id int, layout int) []byte {
-        n := make([]byte, 12)
-        be := []byte{byte(id >> 8), byte(id)}
-        switch layout {
-        case 0:
-            copy(n[4:6], be)
-        case 1:
-            copy(n[10:12], be)
-        case 2:
-            copy(n[0:2], be)
-        case 3:
-            copy(n[8:10], be)
-        }
-        return n
-    }
-    for _, k := range keys {
-        for layout := 0; layout < 4; layout++ {
-            hits := 0
-            for _, r := range m.Records[:nTest] {
-                if _, ok := tryOpen(k.key, idNonce(r.ID, layout), r.Data, nil); ok {
-                    hits++
-                }
-            }
-            if hits >= nTest-1 && hits > 0 {
-                t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
-                    return tryOpen(k.key, idNonce(r.ID, layout), r.Data, nil)
-                })
-                if okCount > 0 {
-                    return t, fmt.Sprintf("%s/id-nonce-%d: %d/%d", k.name, layout, okCount, len(m.Records))
-                }
-            }
-        }
-    }
-
-    for _, k := range keys {
-        hits := 0
-        for _, r := range m.Records[:nTest] {
-            if len(r.Data) >= 28 {
-                if _, ok := tryOpen(k.key, r.Data[:12], r.Data[12:], nil); ok {
-                    hits++
-                }
-            }
-        }
-        if hits >= nTest-1 && hits > 0 {
-            t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
-                if len(r.Data) < 28 {
-                    return nil, false
-                }
-                return tryOpen(k.key, r.Data[:12], r.Data[12:], nil)
-            })
-            if okCount > 0 {
-                return t, fmt.Sprintf("%s/per-rec-nonce: %d/%d", k.name, okCount, len(m.Records))
-            }
-        }
-    }
-
-    var stream []byte
-    for _, r := range m.Records {
-        stream = append(stream, r.Data...)
-    }
-    for _, k := range keys {
-        for _, nc := range nonces {
-            if pt, err := npvsChacha20Stream(k.key, nc.data, stream); err == nil && npvs5LikelyConfig(pt) {
-                return string(pt), "STREAM " + k.name + "/" + nc.name
-            }
-            if pt, err := npvsAesCTRStream(k.key, nc.data, stream); err == nil && npvs5LikelyConfig(pt) {
-                return string(pt), "STREAM-CTR " + k.name + "/" + nc.name
-            }
-        }
-    }
-
-    return "", ""
-}
-
-func npvs5ProbeBody(m *npvs5FileMap) (string, string) {
-    if len(m.Records) == 0 {
-        return "", ""
-    }
-    var keys []npvs5Key
-    if len(m.Prelude32) == 32 {
-        keys = append(keys, npvs5Key{"prelude32", m.Prelude32})
-        s := sha256.Sum256(m.Prelude32)
-        keys = append(keys, npvs5Key{"sha(pre32)", s[:]})
-    }
-    if len(m.Nonce32) == 32 {
-        keys = append(keys, npvs5Key{"nonce32", m.Nonce32})
-        s := sha256.Sum256(m.Nonce32)
-        keys = append(keys, npvs5Key{"sha(n32)", s[:]})
-    }
-    if len(m.Hdr) >= 33 {
-        keys = append(keys, npvs5Key{"pub32", m.Hdr[1:33]})
-        s := sha256.Sum256(m.Hdr[1:33])
-        keys = append(keys, npvs5Key{"sha(pub32)", s[:]})
-    }
-    s := sha256.Sum256(m.BodyNonce)
-    keys = append(keys, npvs5Key{"sha(bodyNonce)", s[:]})
-    return npvs5TryRecordSchemes(keys, m)
-}
-
-func npvs5BuildResult(pt []byte) *processResult {
-    decoded := decodeNpvSentinels(string(npvsPlaintext(pt)))
-    res := &processResult{}
-    res.URIs = regexExtractFromText(decoded)
-    if len(res.URIs) == 0 {
-        if debugModeEnabled() {
-            res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
-        } else {
-            res.Raw = append(res.Raw, npvsNoLinkMessage())
-        }
-    }
-    return res
-}
-
-func npvs5Attack(fileData []byte, password string) (res *processResult, err error) {
-    defer func() {
-        if r := recover(); r != nil {
-            log.Printf("[NPVS5] panic recovered: %v", r)
-            res, err = nil, fmt.Errorf("🐞 پنیک: %v\n💡 این پیام را برای سازنده بفرست", r)
-        }
-    }()
-
-    m, err := npvs5MapFile(fileData)
-    if err != nil {
-        return nil, err
-    }
-
-    // 🔍 قدم ۱: پروب بدون رمز
-    if txt, how := npvs5ProbeBody(m); txt != "" {
-        log.Printf("[NPVS5] probe SUCCESS: %s", how)
-        return npvs5BuildResult([]byte(txt)), nil
-    }
-
-    // 🔑 قدم ۲: حمله به هدر با رمز
-    pwVariants := []string{
-        strings.TrimSpace(password),
-        strings.ReplaceAll(strings.TrimSpace(password), "-", ""),
-    }
-    var pt, key []byte
-    var how string
-    for i, pwd := range pwVariants {
-        if pwd == "" {
-            continue
-        }
-        if p, k, h := npvs5OpenBlock(pwd, m); p != nil {
-            pt, key, how = p, k, fmt.Sprintf("%s (pw#%d)", h, i+1)
-            break
-        }
-    }
-
-    var dek []byte
-    if pt != nil {
-        log.Printf("[NPVS5] header opened: %s", how)
-        var inner npvsHeader
-        if err := json.Unmarshal(pt, &inner); err != nil {
-            var mm map[string]any
-            if err2 := msgpack.Unmarshal(pt, &mm); err2 == nil {
-                if jb, jerr := json.Marshal(mm); jerr == nil {
-                    _ = json.Unmarshal(jb, &inner)
-                }
-            }
-        }
-        if inner.Passphrase != nil {
-            if d, e := npvsUnwrapPassphrase(inner.Passphrase, pwVariants[0]); e == nil {
-                dek = d
-            }
-        }
-        if dek == nil && inner.AppKey != nil {
-            if d, e := npvsUnwrapAppKey(inner.AppKey); e == nil {
-                dek = d
-            }
-        }
-        if dek == nil {
-            dek = npvs5FindDek(pt)
-        }
-        if dek == nil {
-            dek = key
-        }
-    }
-
-    if dek != nil {
-        keys := []npvs5Key{{"dek", dek}}
-        if len(pwVariants) > 0 && pwVariants[0] != "" {
-            for _, sc := range npvs5SaltCandidates(m) {
-                for _, k := range npvs5DeriveKeys(pwVariants[0], sc.data) {
-                    keys = append(keys, npvs5Key{sc.name + "/" + k.name, k.key})
-                }
-            }
-        }
-        if txt, how2 := npvs5TryRecordSchemes(keys, m); txt != "" {
-            log.Printf("[NPVS5] records: %s", how2)
-            return npvs5BuildResult([]byte(txt)), nil
-        }
-        if p2, e2 := npvsOpenBodyMulti(dek, m.BodyNonce, m.Body, [][]byte{nil, m.Hdr}); e2 == nil {
-            r := npvs5BuildResult(p2)
-            if len(r.URIs) > 0 {
-                return r, nil
-            }
-        }
-    }
-
-    wb := npvsWBSelfTest()
-    if pt != nil {
-        return nil, fmt.Errorf("🐞 هدر باز شد (%s) ولی رکوردها نه\n%s\n%s", how, wb, npvs5Analyze(m))
-    }
-    return nil, fmt.Errorf(
-        "🔑 بلوک هدر با این رمز باز نشد\n%s\n%s\n🆕 ۱۷ KDF × ۱۲ ناحیه ct × ۱۴ nonce × ۷ AAD + پروب",
-        wb, npvs5Analyze(m))
-}
-
 // ═══════════════════ نقطه ورود ═══════════════════
 
 func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
     env, err := parseNpvsEnvelope(data)
     if err != nil {
-        sendNPVSDebugDump(chatID, data)
-        ver := -1
-        if len(data) >= 5 {
-            ver = int(data[4])
-        }
-        if ver >= 2 && ver <= npvsMaxVersion && bytes.HasPrefix(data, []byte("NPVS")) {
-            // 🔍 اول پروب بدون رمز
-            if m, merr := npvs5MapFile(data); merr == nil {
-                if txt, how := npvs5ProbeBody(m); txt != "" {
-                    log.Printf("[NPVS5] probe SUCCESS: %s", how)
-                    return npvs5BuildResult([]byte(txt)), nil, false
-                }
-            }
-            setPendingPass(chatID, "npvs", data)
-            reply(chatID, "🔐 فایل NPVS v5 — هدر رمزشده است.\n🔑 رمز (Key) را بفرستید:\n\n"+err.Error())
-            return nil, nil, true
-        }
         return nil, err, false
     }
 
@@ -1856,38 +917,19 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         dek, uerr := npvsUnwrapAppKey(env.hdr.AppKey)
         if uerr == nil {
             if pt, berr := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw); berr == nil {
-                decoded := decodeNpvSentinels(string(npvsPlaintext(pt)))
+                decoded := decodeNpvSentinels(string(pt))
                 res.URIs = regexExtractFromText(decoded)
                 if len(res.URIs) > 0 {
                     return res, nil, false
                 }
+                // 🔒 دیباگ فقط با DEBUG=1
                 if debugModeEnabled() {
                     res.Raw = append(res.Raw, npvsDebugInfo([]byte(decoded)))
                 } else {
                     res.Raw = append(res.Raw, npvsNoLinkMessage())
                 }
                 return res, nil, false
-            } else {
-                dbg := fmt.Sprintf(
-                    "🐞 NPVS DEBUG (body)\n━━━━━━━━━━━━━━\nnonceLen=%d bodyLen=%d aadLen=%d\nerr=%v",
-                    len(env.nonce), len(env.body), len(env.headerRaw), berr)
-                log.Printf("[NPVS] %s", dbg)
-                reply(chatID, dbg)
             }
-        } else {
-            saltLen, wrapLen := 0, 0
-            if s, e1 := npvsB64URL(env.hdr.AppKey.Salt); e1 == nil {
-                saltLen = len(s)
-            }
-            if w, e2 := npvsB64URL(env.hdr.AppKey.Wrap); e2 == nil {
-                wrapLen = len(w)
-            }
-            dbg := fmt.Sprintf(
-                "🐞 NPVS DEBUG (appKey)\n━━━━━━━━━━━━━━\nkdf=%s\nkeyId=%d\nsaltLen=%d wrapLen=%d\ntlastVariants=%d\nerr=%v",
-                env.hdr.AppKey.Kdf, env.hdr.AppKey.KeyID, saltLen, wrapLen,
-                len(wbTlastVariants), uerr)
-            log.Printf("[NPVS] %s", dbg)
-            reply(chatID, dbg)
         }
     }
 
@@ -1911,23 +953,16 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error) {
     env, err := parseNpvsEnvelope(fileData)
     if err != nil {
-        if bytes.HasPrefix(fileData, []byte("NPVS")) && len(fileData) >= 5 && fileData[4] >= 2 {
-            return npvs5Attack(fileData, password)
-        }
         return nil, err
     }
     if env.hdr.Passphrase == nil {
         return nil, fmt.Errorf("این فایل رمز ندارد")
     }
 
-    noDash := strings.ReplaceAll(password, "-", "")
     attempts := []string{
         password,
         strings.TrimSpace(password),
         strings.Join(strings.Fields(password), ""),
-        noDash,
-        strings.ToUpper(noDash),
-        strings.ToLower(noDash),
         strings.ToUpper(strings.Join(strings.Fields(password), "")),
         strings.ToLower(strings.Join(strings.Fields(password), "")),
     }
@@ -1944,26 +979,15 @@ func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error)
         }
     }
     if dek == nil {
-        pw := env.hdr.Passphrase
-        saltLen, wrapLen := 0, 0
-        if s, e1 := npvsB64URL(pw.Salt); e1 == nil {
-            saltLen = len(s)
-        }
-        if w, e2 := npvsB64URL(pw.Wrap); e2 == nil {
-            wrapLen = len(w)
-        }
-        return nil, fmt.Errorf(
-            "🔑 رمز اشتباه — دوباره رمز را بفرستید\n🐞 kdf=%s iters=%d saltLen=%d wrapLen=%d",
-            pw.Kdf, pw.Iters, saltLen, wrapLen)
+        return nil, fmt.Errorf("🔑 رمز اشتباه — دوباره رمز را بفرستید")
     }
 
     pt, err := npvsOpenBody(dek, env.nonce, env.body, env.headerRaw)
     if err != nil {
-        return nil, fmt.Errorf("%v\n🐞 nonceLen=%d bodyLen=%d aadLen=%d",
-            err, len(env.nonce), len(env.body), len(env.headerRaw))
+        return nil, err
     }
 
-    decoded := decodeNpvSentinels(string(npvsPlaintext(pt)))
+    decoded := decodeNpvSentinels(string(pt))
 
     res := &processResult{}
     res.URIs = regexExtractFromText(decoded)
