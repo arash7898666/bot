@@ -24,6 +24,7 @@ import (
 
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
     "github.com/vmihailenco/msgpack/v5"
+    "golang.org/x/crypto/argon2"
     "golang.org/x/crypto/chacha20poly1305"
     "golang.org/x/crypto/pbkdf2"
 )
@@ -523,7 +524,6 @@ type npvsEnvelope struct {
 
 // ═══════════════════ 🐞 دیباگ v3 ═══════════════════
 
-// خطای پارسر که دیباگ را با خودش حمل می‌کند (در پیام «❌» تلگرام می‌رود)
 type npvsParseError struct {
     msg   string
     debug string
@@ -537,7 +537,7 @@ func npvsEnvelopeHollow(e *npvsEnvelope) bool {
         e.hdr.AppKey == nil && len(e.hdr.Recipients) == 0
 }
 
-// پیدا کردن رشته‌های ASCII خوانا (کلیدهای JSON مخفی، اسم KDF و...)
+// پیدا کردن رشته‌های ASCII خوانا
 func npvsAsciiRuns(b []byte, minLen, maxRuns int) []string {
     var runs []string
     start := -1
@@ -577,7 +577,6 @@ func npvsDebugDump(b []byte) string {
                 pr++
             }
         }
-        // ≈37% = رندوم (رمزشده) / خیلی بیشتر = انکودینگ ساختاری (msgpack و...)
         fmt.Fprintf(&sb, "header printable=%.0f%% (≈37%% = encrypted)\n",
             100*float64(pr)/float64(len(hdr)))
 
@@ -593,7 +592,6 @@ func npvsDebugDump(b []byte) string {
         }
     }
 
-    // شکار رشته‌های خوانا در کل فایل
     sb.WriteString("ascii-runs(≥6):\n")
     for _, r := range npvsAsciiRuns(b, 6, 40) {
         sb.WriteString("  " + r + "\n")
@@ -619,7 +617,7 @@ func npvsHexdump(b []byte, width int) string {
     return sb.String()
 }
 
-// دامپ کامل فایل به‌صورت فایل متنی → برای آنالیز آفلاین
+// دامپ کامل فایل به‌صورت فایل متنی
 func sendNPVSDebugDump(chatID int64, data []byte) {
     doc := tgbotapi.NewDocument(chatID, tgbotapi.FileBytes{
         Name:  "npvs_v5_dump.txt",
@@ -655,21 +653,18 @@ func npvsTryDecompress(b []byte) ([]byte, bool) {
     return nil, false
 }
 
-// از خامِ هدر، JSON قابل پارس بیرون می‌کشد:
-// خام → msgpack → پیشوندها → decompress → base64
+// از خامِ هدر، JSON قابل پارس بیرون می‌کشد
 func npvsHeaderJSON(raw []byte) ([]byte, bool) {
     if json.Valid(raw) {
         return raw, true
     }
 
-    // msgpack مستقیم
     var m map[string]any
     if err := msgpack.Unmarshal(raw, &m); err == nil && len(m) > 0 {
         if jb, jerr := json.Marshal(m); jerr == nil {
             return jb, true
         }
     }
-    // یک بایت فلگ + msgpack
     if len(raw) > 1 {
         var m2 map[string]any
         if err := msgpack.Unmarshal(raw[1:], &m2); err == nil && len(m2) > 0 {
@@ -679,14 +674,12 @@ func npvsHeaderJSON(raw []byte) ([]byte, bool) {
         }
     }
 
-    // حذف پیشوند احتمالی و JSON
     for _, off := range []int{1, 2, 4, 8} {
         if len(raw) > off && raw[off] == '{' && json.Valid(raw[off:]) {
             return raw[off:], true
         }
     }
 
-    // decompress (خام / با پیشوند ۱ و ۲ بایتی)
     cands := [][]byte{raw}
     if len(raw) > 1 {
         cands = append(cands, raw[1:])
@@ -700,7 +693,6 @@ func npvsHeaderJSON(raw []byte) ([]byte, bool) {
         }
     }
 
-    // base64
     s := strings.TrimSpace(strings.Join(strings.Fields(string(raw)), ""))
     if len(s) > 8 {
         padded := s
@@ -730,7 +722,6 @@ func npvsPlaintext(pt []byte) []byte {
 
 // ═══════════════════ پارسر envelope ═══════════════════
 
-// پایان JSON متوازن را از start پیدا می‌کند
 func balancedJSONEnd(b []byte, start int) int {
     depth, inStr, esc := 0, false, false
     for i := start; i < len(b); i++ {
@@ -821,7 +812,7 @@ func parseNpvsEnvelope(b []byte) (*npvsEnvelope, error) {
         i = next
     }
 
-    // ─── 🐞 شکست واقعی: لاگ + دیباگ ───
+    // ─── 🐞 شکست واقعی ───
     dbg := npvsDebugDump(b)
     log.Printf("[NPVS] parse failed: ver=%d hdrLen=%d size=%d", ver, hdrLen, len(b))
     msg := "ساختار NPVS شناخته نشد (هدر v5 احتمالاً رمزشده است)"
@@ -1136,11 +1127,9 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
     return nil, fmt.Errorf("بدنه باز نشد")
 }
 
-// ═══════ v5: هدر رمزشده — موتور حمله با passphrase ═══════
+// ═══════ v5: هدر رمزشده — موتور حمله نسخه ۲ ═══════
 
-var npvs5IterCandidates = []int{
-    600000, 310000, 100000, 200000, 1000000, 10000, 1000, 1,
-}
+var npvs5IterCandidates = []int{600000, 310000, 100000, 10000, 1}
 
 func npvsAesGcmOpen(key, nonce, ct, aad []byte) ([]byte, error) {
     block, err := aes.NewCipher(key)
@@ -1154,7 +1143,6 @@ func npvsAesGcmOpen(key, nonce, ct, aad []byte) ([]byte, error) {
     return gcm.Open(nil, nonce, ct, aad)
 }
 
-// تشخیص اینکه متن باز‌شده واقعاً هدر است
 func npvs5HeaderPlausible(pt []byte) bool {
     if len(pt) < 8 {
         return false
@@ -1175,72 +1163,146 @@ func npvs5HeaderPlausible(pt []byte) bool {
     return false
 }
 
-type npvs5Layout struct {
-    name  string
-    salt  []byte
-    nonce []byte
-    ct    []byte
+type npvs5Key struct {
+    name string
+    key  []byte
 }
 
-func npvs5BuildLayouts(H []byte) []npvs5Layout {
+type npvs5HeaderOpen struct {
+    pt  []byte
+    key []byte
+}
+
+// کش مشتق کلید — چیدمان‌های مختلف salt مشترک دارند
+var npvs5KdfCache sync.Map
+
+func npvs5DeriveKeys(pass string, salt []byte) []npvs5Key {
+    ck := pass + "\x00" + hex.EncodeToString(salt)
+    if v, ok := npvs5KdfCache.Load(ck); ok {
+        return v.([]npvs5Key)
+    }
+    var out []npvs5Key
+    pw := []byte(pass)
+    mk := func(name string, b []byte) { out = append(out, npvs5Key{name, b}) }
+
+    h := sha256.Sum256(append(append([]byte{}, pw...), salt...))
+    mk("sha256(pw|salt)", h[:])
+    h = sha256.Sum256(append(append([]byte{}, salt...), pw...))
+    mk("sha256(salt|pw)", h[:])
+    h = sha256.Sum256(pw)
+    mk("sha256(pw)", h[:])
+
+    for _, it := range npvs5IterCandidates {
+        mk(fmt.Sprintf("pbkdf2-%d", it), pbkdf2.Key(pw, salt, it, 32, sha256.New))
+    }
+    mk("argon2id-t1-m64", argon2.IDKey(pw, salt, 1, 64*1024, 4, 32))
+    mk("argon2id-t3-m64", argon2.IDKey(pw, salt, 3, 64*1024, 4, 32))
+
+    npvs5KdfCache.Store(ck, out)
+    return out
+}
+
+type npvs5Layout struct {
+    name    string
+    salt    []byte
+    nonce   []byte
+    ct      []byte
+    aadPref []byte
+}
+
+func npvs5BuildLayouts(H, framing, bodyNonce []byte) []npvs5Layout {
     n := len(H)
     var out []npvs5Layout
+    add := func(name string, s, nn, ct, pref []byte) {
+        if len(ct) > 16 && len(nn) == 12 && len(s) == 16 {
+            out = append(out, npvs5Layout{name, s, nn, ct, pref})
+        }
+    }
     if n >= 45 {
-        out = append(out, npvs5Layout{"id+salt+nonce", H[1:17], H[17:29], H[29:]})
+        add("id+salt+nonce", H[1:17], H[17:29], H[29:], H[:17])
+        add("pub32+salt33", H[33:49], H[17:29], H[29:], H[:17])
     }
     if n >= 44 {
-        out = append(out, npvs5Layout{"salt+nonce", H[0:16], H[16:28], H[28:]})
-        out = append(out, npvs5Layout{"nonce+salt", H[12:28], H[0:12], H[28:]})
-        out = append(out, npvs5Layout{"id+nonce+salt", H[13:29], H[1:13], H[29:]})
+        add("salt0+nonce", H[0:16], H[16:28], H[28:], H[:16])
+        add("nonce0+salt12", H[12:28], H[0:12], H[28:], H[:28])
+        add("id+nonce+salt", H[13:29], H[1:13], H[29:], H[:13])
+    }
+    if n >= 77 {
+        add("salt1+nonceTail", H[1:17], H[n-12:], H[29:n-12], H[:29])
+        add("salt33+nonceTail", H[33:49], H[n-12:], H[49:n-12], H[:49])
+    }
+    if n >= 68 {
+        // بر اساس الگوی 00000009 در آفست 52
+        add("salt1+nonce53", H[1:17], H[53:65], H[65:], H[:53])
+        add("salt1+nonce56", H[1:17], H[56:68], H[68:], H[:56])
+    }
+    if len(bodyNonce) == 12 && n >= 29 {
+        add("salt1+bodyNonce", H[1:17], bodyNonce, H[29:], H[:17])
+        add("salt0+bodyNonce", H[0:16], bodyNonce, H[28:], H[:16])
     }
     return out
 }
 
-type npvs5HeaderOpen struct {
-    pt      []byte
-    aead    string
-    iters   int
-    aadMode string
-    key     []byte
+type npvs5WrapLayout struct {
+    name     string
+    salt     []byte
+    wrap     []byte // 60 بایت: nonce12 + ct48
+    hdrNonce []byte
+    hdrCT    []byte
+    hdrPref  []byte
 }
 
-func npvs5OpenHeader(pass string, H, framing []byte) (*npvs5HeaderOpen, string) {
-    type aadOpt struct {
-        name string
-        data []byte
+func npvs5BuildWrapLayouts(H []byte) []npvs5WrapLayout {
+    n := len(H)
+    var out []npvs5WrapLayout
+    if n >= 89 {
+        out = append(out, npvs5WrapLayout{"wrap@s1", H[1:17], H[17:77], H[77:89], H[89:], H[:77]})
     }
-    aads := []aadOpt{{"none", nil}, {"framing", framing}}
+    if n >= 88 {
+        out = append(out, npvs5WrapLayout{"wrap@s0", H[0:16], H[16:76], H[76:88], H[88:], H[:76]})
+    }
+    return out
+}
 
-    for _, L := range npvs5BuildLayouts(H) {
-        // کلیدهای سریع (SHA256 ساده)
-        quick := make([][]byte, 0, 2)
-        h1 := sha256.Sum256(append([]byte(pass), L.salt...))
-        quick = append(quick, h1[:])
-        h2 := sha256.Sum256(append(append([]byte{}, L.salt...), []byte(pass)...))
-        quick = append(quick, h2[:])
-        for ki, key := range quick {
-            for _, a := range aads {
-                if pt, err := npvsChachaOpen(key, L.nonce, L.ct, a.data); err == nil && npvs5HeaderPlausible(pt) {
-                    return &npvs5HeaderOpen{pt: pt, aead: "chacha", iters: -1, aadMode: a.name, key: key},
-                        fmt.Sprintf("layout=%s quickkey=%d aad=%s", L.name, ki+1, a.name)
+func npvs5OpenHeader(pass string, H, framing, bodyNonce []byte) (*npvs5HeaderOpen, string) {
+    // ── تک‌مرحله‌ای ──
+    for _, L := range npvs5BuildLayouts(H, framing, bodyNonce) {
+        aads := [][]byte{nil, framing}
+        if len(L.aadPref) > 0 {
+            aads = append(aads, L.aadPref)
+        }
+        for _, k := range npvs5DeriveKeys(pass, L.salt) {
+            for _, ad := range aads {
+                if pt, err := npvsChachaOpen(k.key, L.nonce, L.ct, ad); err == nil {
+                    return &npvs5HeaderOpen{pt: pt, key: k.key},
+                        fmt.Sprintf("%s | %s | chacha", L.name, k.name)
                 }
-                if pt, err := npvsAesGcmOpen(key, L.nonce, L.ct, a.data); err == nil && npvs5HeaderPlausible(pt) {
-                    return &npvs5HeaderOpen{pt: pt, aead: "aesgcm", iters: -1, aadMode: a.name, key: key},
-                        fmt.Sprintf("layout=%s quickkey=%d aad=%s", L.name, ki+1, a.name)
+                if pt, err := npvsAesGcmOpen(k.key, L.nonce, L.ct, ad); err == nil {
+                    return &npvs5HeaderOpen{pt: pt, key: k.key},
+                        fmt.Sprintf("%s | %s | aesgcm", L.name, k.name)
                 }
             }
         }
-        // PBKDF2 — کلید یک بار ساخته می‌شود، روی همه AEAD/AAD ها امتحان می‌شود
-        for _, iters := range npvs5IterCandidates {
-            key := pbkdf2.Key([]byte(pass), L.salt, iters, 32, sha256.New)
-            for _, a := range aads {
-                if pt, err := npvsChachaOpen(key, L.nonce, L.ct, a.data); err == nil && npvs5HeaderPlausible(pt) {
-                    return &npvs5HeaderOpen{pt: pt, aead: "chacha", iters: iters, aadMode: a.name, key: key},
-                        fmt.Sprintf("layout=%s pbkdf2 iters=%d aad=%s", L.name, iters, a.name)
+    }
+
+    // ── دومرحله‌ای: wrap داخل هدر (مثل ساختار wrap خود v1) ──
+    for _, W := range npvs5BuildWrapLayouts(H) {
+        for _, k := range npvs5DeriveKeys(pass, W.salt) {
+            for _, wad := range [][]byte{W.salt, nil} {
+                dek, err := npvsChachaOpen(k.key, W.wrap[:12], W.wrap[12:], wad)
+                if err != nil {
+                    continue
                 }
-                if pt, err := npvsAesGcmOpen(key, L.nonce, L.ct, a.data); err == nil && npvs5HeaderPlausible(pt) {
-                    return &npvs5HeaderOpen{pt: pt, aead: "aesgcm", iters: iters, aadMode: a.name, key: key},
-                        fmt.Sprintf("layout=%s pbkdf2 iters=%d aad=%s", L.name, iters, a.name)
+                aads := [][]byte{nil, framing, W.hdrPref}
+                for _, ad := range aads {
+                    if pt, err2 := npvsChachaOpen(dek, W.hdrNonce, W.hdrCT, ad); err2 == nil {
+                        return &npvs5HeaderOpen{pt: pt, key: dek},
+                            fmt.Sprintf("%s | %s | chacha | dek-ok", W.name, k.name)
+                    }
+                    if pt, err2 := npvsAesGcmOpen(dek, W.hdrNonce, W.hdrCT, ad); err2 == nil {
+                        return &npvs5HeaderOpen{pt: pt, key: dek},
+                            fmt.Sprintf("%s | %s | aesgcm | dek-ok", W.name, k.name)
+                    }
                 }
             }
         }
@@ -1309,42 +1371,36 @@ func npvs5Attack(fileData []byte, password string) (*processResult, error) {
     }
     H := fileData[9 : 9+hdrLen]
     framing := fileData[:9]
-
-    // 🔑 امتحان variant های رمز (با خط تیره، بدون خط تیره، بزرگ/کوچک)
-    noDash := strings.ReplaceAll(password, "-", "")
-    attempts := []string{
-        password,
-        strings.TrimSpace(password),
-        strings.Join(strings.Fields(password), ""),
-        noDash,
-        strings.ToUpper(noDash),
-        strings.ToLower(noDash),
+    var bodyNonce []byte
+    if 9+hdrLen+12 <= len(fileData) {
+        bodyNonce = fileData[9+hdrLen : 9+hdrLen+12]
     }
-    seen := map[string]bool{}
+
+    pwVariants := []string{
+        strings.TrimSpace(password),
+        strings.ReplaceAll(strings.TrimSpace(password), "-", ""),
+    }
     var opened *npvs5HeaderOpen
     var how string
-    for _, pwd := range attempts {
-        pwd = strings.TrimSpace(pwd)
-        if pwd == "" || seen[pwd] {
+    for i, pwd := range pwVariants {
+        if pwd == "" {
             continue
         }
-        seen[pwd] = true
-        if o, h := npvs5OpenHeader(pwd, H, framing); o != nil {
-            opened, how = o, h
+        if o, h := npvs5OpenHeader(pwd, H, framing, bodyNonce); o != nil {
+            opened = o
+            how = fmt.Sprintf("%s (pw#%d)", h, i+1)
             break
         }
     }
     if opened == nil {
-        log.Printf("[NPVS5] header open failed with given password (%d variants)", len(seen))
+        log.Printf("[NPVS5] header open failed with given password")
         return nil, fmt.Errorf(
-            "🔑 هیچ ترکیبی از KDF/چیدمان با این رمز هدر را باز نکرد\n"+
-                "🐞 امتحان‌شده: %d چیدمان × %d iters × ۲ AEAD × ۲ AAD × %d variant رمز\n"+
-                "💡 مطمئن شو رمز دقیقاً همان Key است",
-            len(npvs5BuildLayouts(H)), len(npvs5IterCandidates), len(seen))
+            "🔑 هیچ ترکیبی هدر را باز نکرد\n" +
+                "🐞 v2: ~۱۰ چیدمان × ۱۰ KDF (sha/pbkdf2/argon2id) × ۲ AEAD × چند AAD × ۲ variant رمز\n" +
+                "💡 ۸ خط اول فایل npvs_v5_dump.txt را بفرست")
     }
     log.Printf("[NPVS5] header opened: %s", how)
 
-    // هدر باز‌شده → wrap ها
     var inner npvsHeader
     if err := json.Unmarshal(opened.pt, &inner); err != nil {
         var m map[string]any
@@ -1355,11 +1411,10 @@ func npvs5Attack(fileData []byte, password string) (*processResult, error) {
         }
     }
 
-    // پیدا کردن DEK
     var dek []byte
     switch {
     case inner.Passphrase != nil:
-        if d, e := npvsUnwrapPassphrase(inner.Passphrase, password); e == nil {
+        if d, e := npvsUnwrapPassphrase(inner.Passphrase, pwVariants[0]); e == nil {
             dek = d
         }
     case inner.AppKey != nil:
@@ -1371,14 +1426,13 @@ func npvs5Attack(fileData []byte, password string) (*processResult, error) {
         dek = npvs5FindDek(opened.pt)
     }
     if dek == nil {
-        dek = opened.key // شاید همان کلید هدر برای بدنه هم هست
+        dek = opened.key
     }
     if dek == nil {
-        return nil, fmt.Errorf("🐞 هدر باز شد (%s) ولی wrap/dek در آن پیدا نشد\nPT[0:120]: %s",
-            how, debugPreview(string(opened.pt), 120))
+        return nil, fmt.Errorf("🐞 هدر باز شد (%s) ولی dek پیدا نشد\nPT[0:160]: %s",
+            how, debugPreview(string(opened.pt), 160))
     }
 
-    // بدنه: بعد از هدر مثل v1
     off := 9 + hdrLen
     nonce := fileData[off : off+12]
     bodyLen := int(binary.BigEndian.Uint32(fileData[off+12 : off+16]))
@@ -1426,7 +1480,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
             ver = int(data[4])
         }
         if ver >= 2 && ver <= npvsMaxVersion && bytes.HasPrefix(data, []byte("NPVS")) {
-            // v5: هدر رمزشده → رمز بپرس (دیباگ هم داخل پیام است)
+            // v5: هدر رمزشده → رمز بپرس
             setPendingPass(chatID, "npvs", data)
             reply(chatID, "🔐 فایل NPVS v5 — هدر رمزشده است.\n🔑 رمز (Key) را بفرستید:\n\n"+err.Error())
             return nil, nil, true
