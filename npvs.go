@@ -1138,8 +1138,8 @@ type npvs5FileMap struct {
 
 // نقشه v5 (از hexdump کشف شد):
 //   Hdr[0]=ver | Hdr[1:33]=pub32 | Hdr[33:49]=salt16 | Hdr[49..]=TLVها
-//   Hdr[100:132]=nonce32 | Hdr[132]=0x23 | Hdr[133:137]=len(4BE)=1049 | Hdr[137:]=بلوک رمز
-//   Body = "NPF"+0x01 | prelude32 (Body[4:36]) | count(2BE)=تعداد+1 | رکوردها {id(2BE)|len(4BE)|data}
+//   Hdr[100:132]=nonce32 | Hdr[132]=0x23 | Hdr[133:137]=len(4BE) | Hdr[137:]=بلوک رمز
+//   Body = "NPF"+0x01 | prelude32 (Body[4:36]) | count(2BE) | رکوردها {id(2BE)|len(4BE)|data}
 func npvs5MapFile(f []byte) (*npvs5FileMap, error) {
     if len(f) < 120 || !bytes.HasPrefix(f, []byte("NPVS")) {
         return nil, fmt.Errorf("فایل NPVS نیست")
@@ -1181,13 +1181,6 @@ func npvs5MapFile(f []byte) (*npvs5FileMap, error) {
     return m, nil
 }
 
-func npvs5min(a, b int) int {
-    if a < b {
-        return a
-    }
-    return b
-}
-
 func npvs5Analyze(m *npvs5FileMap) string {
     var sb strings.Builder
     sb.WriteString("🗺️ نقشه v5:\n")
@@ -1226,11 +1219,14 @@ func npvsAesGcmOpen(key, nonce, ct, aad []byte) ([]byte, error) {
     return gcm.Open(nil, nonce, ct, aad)
 }
 
-func npvsAesCTRStream(key, iv, ct []byte) ([]byte, error) {
+// 🔧 فیکس پنیک: AES-CTR به IV شانزده بایتی نیاز دارد → nonce را صفر-پد می‌کنیم
+func npvsAesCTRStream(key, nonce12, ct []byte) ([]byte, error) {
     block, err := aes.NewCipher(key)
     if err != nil {
         return nil, err
     }
+    iv := make([]byte, 16)
+    copy(iv, nonce12)
     out := make([]byte, len(ct))
     cipher.NewCTR(block, iv).XORKeyStream(out, ct)
     return out, nil
@@ -1300,7 +1296,7 @@ func npvs5DeriveKeys(pass string, salt []byte) []npvs5Key {
     return out
 }
 
-// ─── کاندیدهای salt و nonce (بر اساس نقشه) ───
+// ─── کاندیدهای salt و nonce ───
 
 type npvs5Blob struct {
     name string
@@ -1351,31 +1347,38 @@ func npvs5NonceCandidates(m *npvs5FileMap) []npvs5Blob {
 }
 
 // ─── باز کردن بلوک هدر با رمز ───
-// ⚠️ دیگر گیت plausibility نداریم: تگ AEAD خودش صحت را تضمین می‌کند
-// (باگ v5.3: محتوای باینری سفارشی رد می‌شد!)
-func npvs5OpenBlock(pass string, m *npvs5FileMap) ([]byte, []byte, string) {
+// تگ AEAD خودش صحت را تضمین می‌کند — بدون گیت اضافی
+func npvs5OpenBlock(pass string, m *npvs5FileMap) (pt []byte, key []byte, how string) {
+    // 🛡️ محافظ پنیک
+    defer func() {
+        if r := recover(); r != nil {
+            log.Printf("[NPVS5] panic in OpenBlock: %v", r)
+            pt, key, how = nil, nil, ""
+        }
+    }()
+
     for _, sc := range npvs5SaltCandidates(m) {
         keys := npvs5DeriveKeys(pass, sc.data)
         for _, k := range keys {
             // حالت A: Block = nonce12 + ct
             if len(m.Block) >= 28 {
                 for _, ad := range [][]byte{nil, m.Hdr[:49], m.Hdr[:100], m.Hdr[:133], m.Hdr[:137], m.Hdr, m.Prelude32} {
-                    if pt, err := npvsChachaOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
-                        return pt, k.key, sc.name + "/" + k.name + "|chacha|block-nonce"
+                    if p, err := npvsChachaOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
+                        return p, k.key, sc.name + "/" + k.name + "|chacha|block-nonce"
                     }
-                    if pt, err := npvsAesGcmOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
-                        return pt, k.key, sc.name + "/" + k.name + "|aesgcm|block-nonce"
+                    if p, err := npvsAesGcmOpen(k.key, m.Block[:12], m.Block[12:], ad); err == nil {
+                        return p, k.key, sc.name + "/" + k.name + "|aesgcm|block-nonce"
                     }
                 }
             }
             // حالت B: Block کامل = ct با nonce کاندید
             for _, nc := range npvs5NonceCandidates(m) {
                 for _, ad := range [][]byte{nil, m.Hdr[:49], m.Hdr[:100], m.Hdr[:133], m.Hdr[:137], m.Hdr} {
-                    if pt, err := npvsChachaOpen(k.key, nc.data, m.Block, ad); err == nil {
-                        return pt, k.key, sc.name + "/" + k.name + "|chacha|" + nc.name
+                    if p, err := npvsChachaOpen(k.key, nc.data, m.Block, ad); err == nil {
+                        return p, k.key, sc.name + "/" + k.name + "|chacha|" + nc.name
                     }
-                    if pt, err := npvsAesGcmOpen(k.key, nc.data, m.Block, ad); err == nil {
-                        return pt, k.key, sc.name + "/" + k.name + "|aesgcm|" + nc.name
+                    if p, err := npvsAesGcmOpen(k.key, nc.data, m.Block, ad); err == nil {
+                        return p, k.key, sc.name + "/" + k.name + "|aesgcm|" + nc.name
                     }
                 }
             }
@@ -1384,8 +1387,8 @@ func npvs5OpenBlock(pass string, m *npvs5FileMap) ([]byte, []byte, string) {
                 if xa, err := chacha20poly1305.NewX(k.key); err == nil {
                     for _, n := range [][]byte{m.Nonce32[:24], m.Nonce32[8:32]} {
                         for _, ad := range [][]byte{nil, m.Hdr[:100], m.Hdr} {
-                            if pt, err := xa.Open(nil, n, m.Block, ad); err == nil {
-                                return pt, k.key, sc.name + "/" + k.name + "|xchacha"
+                            if p, err := xa.Open(nil, n, m.Block, ad); err == nil {
+                                return p, k.key, sc.name + "/" + k.name + "|xchacha"
                             }
                         }
                     }
@@ -1447,19 +1450,30 @@ func npvsOpenBodyMulti(dek, nonce, body []byte, extraAads [][]byte) ([]byte, err
     return nil, fmt.Errorf("بدنه باز نشد")
 }
 
-// ─── موتور اسکیمای رکوردها: با هر لیست کلیدی امتحان می‌کند ───
+// ─── موتور اسکیمای رکوردها ───
 
-func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
+func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (txt string, how string) {
+    // 🛡️ محافظ پنیک
+    defer func() {
+        if r := recover(); r != nil {
+            log.Printf("[NPVS5] panic in RecordSchemes: %v", r)
+            txt, how = "", ""
+        }
+    }()
+
     if len(m.Records) == 0 {
         return "", ""
     }
-    nTest := npvs5min(3, len(m.Records))
+    nTest := len(m.Records)
+    if nTest > 3 {
+        nTest = 3
+    }
 
     tryOpen := func(key, nonce, ct, ad []byte) ([]byte, bool) {
         if len(ct) < 16 || len(nonce) != 12 {
             return nil, false
         }
-        // تگ AEAD = تضمین صحت؛ بدون شرط اضافه
+        // تگ AEAD = تضمین صحت
         if pt, err := npvsChachaOpen(key, nonce, ct, ad); err == nil {
             return pt, true
         }
@@ -1488,7 +1502,7 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
         return sb.String(), ok
     }
 
-    // ۱) اسکیمای ثابت: کلید/nonce/AAD یکسان برای همه
+    // ۱) اسکیمای ثابت
     for _, k := range keys {
         for _, nc := range nonces {
             for _, useID := range []bool{false, true} {
@@ -1503,7 +1517,7 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
                     }
                 }
                 if hits >= nTest-1 && hits > 0 {
-                    txt, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
+                    t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
                         ad := []byte(nil)
                         if useID {
                             ad = idAad(r.ID)
@@ -1515,7 +1529,7 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
                         if useID {
                             name += "/aad=id"
                         }
-                        return txt, fmt.Sprintf("%s: %d/%d", name, okCount, len(m.Records))
+                        return t, fmt.Sprintf("%s: %d/%d", name, okCount, len(m.Records))
                     }
                 }
             }
@@ -1547,11 +1561,11 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
                 }
             }
             if hits >= nTest-1 && hits > 0 {
-                txt, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
+                t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
                     return tryOpen(k.key, idNonce(r.ID, layout), r.Data, nil)
                 })
                 if okCount > 0 {
-                    return txt, fmt.Sprintf("%s/id-nonce-%d: %d/%d", k.name, layout, okCount, len(m.Records))
+                    return t, fmt.Sprintf("%s/id-nonce-%d: %d/%d", k.name, layout, okCount, len(m.Records))
                 }
             }
         }
@@ -1568,19 +1582,19 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
             }
         }
         if hits >= nTest-1 && hits > 0 {
-            txt, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
+            t, okCount := collect(func(r npvs5TLV) ([]byte, bool) {
                 if len(r.Data) < 28 {
                     return nil, false
                 }
                 return tryOpen(k.key, r.Data[:12], r.Data[12:], nil)
             })
             if okCount > 0 {
-                return txt, fmt.Sprintf("%s/per-rec-nonce: %d/%d", k.name, okCount, len(m.Records))
+                return t, fmt.Sprintf("%s/per-rec-nonce: %d/%d", k.name, okCount, len(m.Records))
             }
         }
     }
 
-    // ۴) استریم یکپارچه (بدون تگ): داده رکوردها پشت سر هم
+    // ۴) استریم یکپارچه (بدون تگ)
     var stream []byte
     for _, r := range m.Records {
         stream = append(stream, r.Data...)
@@ -1599,7 +1613,7 @@ func npvs5TryRecordSchemes(keys []npvs5Key, m *npvs5FileMap) (string, string) {
     return "", ""
 }
 
-// 🔍 پروب بدون رمز: کلیدهای داخل خود فایل (prelude32 و ...)
+// 🔍 پروب بدون رمز: کلیدهای داخل خود فایل
 func npvs5ProbeBody(m *npvs5FileMap) (string, string) {
     if len(m.Records) == 0 {
         return "", ""
@@ -1639,7 +1653,16 @@ func npvs5BuildResult(pt []byte) *processResult {
     return res
 }
 
-func npvs5Attack(fileData []byte, password string) (*processResult, error) {
+func npvs5Attack(fileData []byte, password string) (res *processResult, err error) {
+    // 🛡️ محافظ اصلی: هر پنیک → خطای تمیز با متن پنیک
+    defer func() {
+        if r := recover(); r != nil {
+            log.Printf("[NPVS5] panic recovered: %v", r)
+            res, err = nil, fmt.Errorf(
+                "🐞 خطای داخلی v5 (پنیک گرفته شد): %v\n💡 این پیام را برای سازنده بفرست", r)
+        }
+    }()
+
     m, err := npvs5MapFile(fileData)
     if err != nil {
         return nil, err
@@ -1699,7 +1722,7 @@ func npvs5Attack(fileData []byte, password string) (*processResult, error) {
     }
 
     if dek != nil {
-        // قدم ۳: رکوردها با dek + کلیدهای مشتق از رمز روی همه salt ها
+        // قدم ۳: رکوردها با dek + کلیدهای مشتق از رمز
         keys := []npvs5Key{{"dek", dek}}
         if len(pwVariants) > 0 && pwVariants[0] != "" {
             for _, sc := range npvs5SaltCandidates(m) {
@@ -1713,9 +1736,9 @@ func npvs5Attack(fileData []byte, password string) (*processResult, error) {
             return npvs5BuildResult([]byte(txt)), nil
         }
         if p2, e2 := npvsOpenBodyMulti(dek, m.BodyNonce, m.Body, [][]byte{nil, m.Hdr}); e2 == nil {
-            res := npvs5BuildResult(p2)
-            if len(res.URIs) > 0 {
-                return res, nil
+            r := npvs5BuildResult(p2)
+            if len(r.URIs) > 0 {
+                return r, nil
             }
         }
     }
