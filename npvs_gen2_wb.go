@@ -53,14 +53,14 @@ func npvGen2GetTablesZ() ([]byte, error) {
         "https://cdn.jsdelivr.net/gh/FrontierTM/Pantegnos@main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
         "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
     }
-    for _, url := range urls {
-        b, err := fetchURL(url)
+    for _, u := range urls {
+        b, err := fetchURL(u)
         if err == nil && len(b) > 1000 {
             _ = os.WriteFile(cache, b, 0644)
-            log.Printf("[NPVS-GEN2] ✅ جدول از %s دانلود شد (%d بایت)", url, len(b))
+            log.Printf("[NPVS-GEN2] ✅ جدول از %s دانلود شد (%d بایت)", u, len(b))
             return b, nil
         }
-        log.Printf("[NPVS-GEN2] ❌ %s → err=%v len=%d", url, err, len(b))
+        log.Printf("[NPVS-GEN2] ❌ %s → err=%v len=%d", u, err, len(b))
     }
     return nil, fmt.Errorf("gen2_tables.bin.z از هیچ مسیری دریافت نشد — لینک Raw را دستی بده")
 }
