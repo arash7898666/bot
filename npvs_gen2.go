@@ -416,7 +416,7 @@ func npvGen2Links(fields map[uint16][]byte) ([]string, error) {
     return links, nil
 }
 
-// 🆕 تبدیل به لینک — v2rayJson (رشته JSON توکار) هم پشتیبانی می‌شود
+// 🆕 تبدیل به لینک — v2rayJson (رشته JSON توکار) + fallback regex
 func npvGen2Link(cfg any) string {
     obj, ok := cfg.(map[string]any)
     if !ok {
@@ -426,10 +426,15 @@ func npvGen2Link(cfg any) string {
     address := npvGen2Text(obj["address"])
 
     // v2rayJson / v2rRawJson — رشته JSON توکار (فرمت رایج اپ NPV Tunnel)
-    // با موتور موجود main.go به vless/vmess/trojan/ss تبدیل می‌شود
     for _, key := range []string{"v2rayJson", "v2rRawJson"} {
         if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
-            if uris, err := extractURIsFromConfig(cleanEmbeddedJSON(vj)); err == nil && len(uris) > 0 {
+            clean := cleanEmbeddedJSON(vj)
+            // مسیر ۱: پارس ساختاری (JSONهای استاندارد با پورت عددی)
+            if uris, err := extractURIsFromConfig(clean); err == nil && len(uris) > 0 {
+                return strings.Join(uris, "\n")
+            }
+            // مسیر ۲: استخراج regex — پورت‌های رشته‌ای ("443") را هم می‌فهمد
+            if uris := regexExtractFromText(string(clean)); len(uris) > 0 {
                 return strings.Join(uris, "\n")
             }
         }
