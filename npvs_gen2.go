@@ -159,24 +159,36 @@ func (e *npvGen2Envelope) unlockHint(err error) error {
     }
     return err
 }
+func npvGen2Link(cfg any) string {
+    obj, ok := cfg.(map[string]any)
+    if !ok {
+        return npvGen2Text(cfg)
+    }
+    remarks := npvGen2Text(obj["name"])
+    address := npvGen2Text(obj["address"])
 
-type npvGen2Field struct {
-    seq   uint16
-    flags uint16
-    blob  []byte
-}
+    // 🆕 v2rayJson / v2rRawJson — رشته JSON توکار (فرمت رایج اپ NPV Tunnel)
+    // با موتور موجود main.go تبدیل به vless/vmess/trojan/ss می‌شود
+    for _, key := range []string{"v2rayJson", "v2rRawJson"} {
+        if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
+            if uris, err := extractURIsFromConfig(cleanEmbeddedJSON(vj)); err == nil && len(uris) > 0 {
+                return strings.Join(uris, "\n")
+            }
+        }
+    }
 
-type npvGen2MetadataPolicy struct {
-    AttestationLevel    string `json:"attestationLevel"`
-    ConfigVersion       int    `json:"configVersion"`
-    CustomServerMessage string `json:"customServerMessage"`
-    DisplayMessage      string `json:"displayMessage"`
-    OnlyMobileNetwork   bool   `json:"onlyMobileNetwork"`
-}
-
-type npvGen2Metadata struct {
-    IssuedAt string                `json:"issuedAt"`
-    Policy   npvGen2MetadataPolicy `json:"policy"`
+    if profile, ok := obj["v2rayProfile"].(map[string]any); ok {
+        return npvGen2V2RayLink(remarks, address, npvGen2FlatMap(profile))
+    }
+    if ssh, ok := obj["sshConfig"].(map[string]any); ok {
+        return npvGen2SSHText(remarks, npvGen2FlatMap(ssh))
+    }
+    for _, kind := range []string{"socksConfig", "socksProfile", "httpConfig", "httpProfile", "proxyConfig"} {
+        if sub, ok := obj[kind].(map[string]any); ok {
+            return npvGen2ProxyText(remarks, address, kind, npvGen2FlatMap(sub))
+        }
+    }
+    return npvGen2KeyValues(npvGen2FlatMap(obj))
 }
 
 func isNpvGen2Envelope(b []byte) bool {
