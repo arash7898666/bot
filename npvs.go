@@ -15,7 +15,6 @@ import (
     "sync"
     "time"
 
-    tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
     "golang.org/x/crypto/chacha20poly1305"
     "golang.org/x/crypto/pbkdf2"
 )
