@@ -587,9 +587,13 @@ var (
     wbOnce          sync.Once
 )
 
+// ✅ ریپوی اصلی: FrontierTM/Pantegnos (+ KernelDotDLL به‌عنوان fallback)
 var npvsRepoBases = []string{
+    "https://raw.githubusercontent.com/FrontierTM/Pantegnos/main/internal/modules/impl/assets/npvs/",
+    "https://raw.githubusercontent.com/FrontierTM/Pantegnos/master/internal/modules/impl/assets/npvs/",
     "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/main/internal/modules/impl/assets/npvs/",
     "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/master/internal/modules/impl/assets/npvs/",
+    "https://cdn.jsdelivr.net/gh/FrontierTM/Pantegnos@main/internal/modules/impl/assets/npvs/",
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@main/internal/modules/impl/assets/npvs/",
     "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@master/internal/modules/impl/assets/npvs/",
 }
