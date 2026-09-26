@@ -1,13 +1,13 @@
 package main
 
 import (
-    "bytes"
     "crypto/sha256"
     "encoding/base64"
     "encoding/binary"
     "encoding/json"
     "fmt"
     "io"
+    "log"
     "net/url"
     "sort"
     "strconv"
@@ -37,11 +37,6 @@ const (
     npvGen2AppKeyBlockSize   = 78
     npvGen2KeySize           = 32
     npvGen2SigSize           = 64
-
-    npvGen2TypeVMess       = 1
-    npvGen2TypeShadowsocks = 3
-    npvGen2TypeVLESS       = 5
-    npvGen2TypeTrojan      = 6
 
     npvOpenMarker   = "NPVO1"
     npvSubMarker    = "NPVTSUB1"
@@ -396,6 +391,225 @@ func npvGen2HKDF(ikm, salt []byte, info string) []byte {
     return out
 }
 
+// ═══════ 🆕 پارسر مستقیم v2rayJson — tolerant (پورت رشته‌ای/عددی هر دو) ═══════
+
+func npvGen2GetMap(v any) map[string]any {
+    m, _ := v.(map[string]any)
+    return m
+}
+
+func npvGen2GetArr(v any) []any {
+    a, _ := v.([]any)
+    return a
+}
+
+func npvGen2GetStr(m map[string]any, k string) string {
+    if m == nil {
+        return ""
+    }
+    return npvGen2Text(m[k])
+}
+
+func npvGen2GetInt(m map[string]any, k string) int {
+    if m == nil {
+        return 0
+    }
+    switch t := m[k].(type) {
+    case float64:
+        return int(t)
+    case string:
+        return npvGen2Int(t)
+    }
+    return 0
+}
+
+// npvGen2V2RayJSONLinks — v2rayJson (رشته یا آبجکت) را خودش parse و به لینک تبدیل می‌کند
+func npvGen2V2RayJSONLinks(raw any) []string {
+    var root map[string]any
+    switch v := raw.(type) {
+    case string:
+        if strings.TrimSpace(v) == "" {
+            return nil
+        }
+        if err := json.Unmarshal([]byte(cleanEmbeddedJSON(v)), &root); err != nil {
+            return nil
+        }
+    case map[string]any:
+        root = v
+    default:
+        return nil
+    }
+    if root == nil {
+        return nil
+    }
+
+    remarks := npvGen2Text(root["remarks"])
+    var uris []string
+    for _, ob := range npvGen2GetArr(root["outbounds"]) {
+        m := npvGen2GetMap(ob)
+        if m == nil {
+            continue
+        }
+        proto := strings.ToLower(npvGen2GetStr(m, "protocol"))
+        switch proto {
+        case "trojan", "vless", "vmess", "shadowsocks":
+            if u := npvGen2OutboundToURI(proto, m, remarks); u != "" {
+                uris = append(uris, u)
+            }
+        }
+    }
+    return uris
+}
+
+func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) string {
+    settings := npvGen2GetMap(ob["settings"])
+    stream := npvGen2GetMap(ob["streamSettings"])
+
+    host, port, password, uuid, flow, method := "", 0, "", "", "", ""
+    switch proto {
+    case "trojan", "shadowsocks":
+        servers := npvGen2GetArr(settings["servers"])
+        if len(servers) == 0 {
+            return ""
+        }
+        s := npvGen2GetMap(servers[0])
+        host = npvGen2GetStr(s, "address")
+        port = npvGen2GetInt(s, "port")
+        password = npvGen2GetStr(s, "password")
+        if proto == "shadowsocks" {
+            method = npvGen2GetStr(s, "method")
+        }
+    case "vless", "vmess":
+        vnext := npvGen2GetArr(settings["vnext"])
+        if len(vnext) == 0 {
+            return ""
+        }
+        v := npvGen2GetMap(vnext[0])
+        host = npvGen2GetStr(v, "address")
+        port = npvGen2GetInt(v, "port")
+        users := npvGen2GetArr(v["users"])
+        if len(users) == 0 {
+            return ""
+        }
+        u := npvGen2GetMap(users[0])
+        uuid = npvGen2GetStr(u, "id")
+        password = uuid
+        flow = npvGen2GetStr(u, "flow")
+        method = npvGen2Or(npvGen2GetStr(u, "security"), "auto")
+    }
+    if host == "" || port == 0 || password == "" {
+        return ""
+    }
+    if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+        host = "[" + host + "]"
+    }
+
+    q := url.Values{}
+    network := strings.ToLower(npvGen2GetStr(stream, "network"))
+    if network == "" {
+        network = "tcp"
+    }
+    security := strings.ToLower(npvGen2GetStr(stream, "security"))
+    if security == "" {
+        security = "none"
+    }
+    q.Set("type", network)
+    q.Set("security", security)
+
+    tls := npvGen2GetMap(stream["tlsSettings"])
+    reality := npvGen2GetMap(stream["realitySettings"])
+    ws := npvGen2GetMap(stream["wsSettings"])
+    grpc := npvGen2GetMap(stream["grpcSettings"])
+
+    switch network {
+    case "ws":
+        npvGen2Set(q, "path", npvGen2GetStr(ws, "path"))
+        h := npvGen2GetStr(ws, "host")
+        if h == "" {
+            if hd := npvGen2GetMap(ws["headers"]); hd != nil {
+                h = npvGen2GetStr(hd, "Host")
+            }
+        }
+        npvGen2Set(q, "host", h)
+    case "grpc":
+        npvGen2Set(q, "serviceName", npvGen2GetStr(grpc, "serviceName"))
+        npvGen2Set(q, "mode", npvGen2Or(npvGen2GetStr(grpc, "mode"), "gun"))
+    case "httpupgrade", "xhttp":
+        npvGen2Set(q, "path", npvGen2GetStr(npvGen2GetMap(stream[network+"Settings"]), "path"))
+        npvGen2Set(q, "host", npvGen2GetStr(npvGen2GetMap(stream[network+"Settings"]), "host"))
+    }
+
+    switch security {
+    case "tls":
+        npvGen2Set(q, "sni", npvGen2GetStr(tls, "serverName"))
+        npvGen2Set(q, "fp", npvGen2GetStr(tls, "fingerprint"))
+        if alpn := npvGen2GetArr(tls["alpn"]); len(alpn) > 0 {
+            var parts []string
+            for _, a := range alpn {
+                parts = append(parts, npvGen2Text(a))
+            }
+            q.Set("alpn", strings.Join(parts, ","))
+        }
+        if strings.EqualFold(npvGen2GetStr(tls, "allowInsecure"), "true") {
+            q.Set("allowInsecure", "1")
+        }
+    case "reality":
+        npvGen2Set(q, "sni", npvGen2GetStr(reality, "serverName"))
+        npvGen2Set(q, "fp", npvGen2GetStr(reality, "fingerprint"))
+        npvGen2Set(q, "pbk", npvGen2GetStr(reality, "publicKey"))
+        npvGen2Set(q, "sid", npvGen2GetStr(reality, "shortId"))
+    }
+
+    rem := cleanRemarks(remarks)
+    switch proto {
+    case "trojan":
+        if flow != "" {
+            q.Set("flow", flow)
+        }
+        return fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
+            url.PathEscape(password), host, port, q.Encode(), rem)
+    case "vless":
+        q.Set("encryption", "none")
+        if flow != "" {
+            q.Set("flow", flow)
+        }
+        return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
+            password, host, port, q.Encode(), rem)
+    case "shadowsocks":
+        if method == "" {
+            method = "aes-256-gcm"
+        }
+        ui := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
+        return fmt.Sprintf("ss://%s@%s:%d#%s", ui, host, port, rem)
+    case "vmess":
+        netPath, netHost := "", ""
+        switch network {
+        case "ws":
+            netPath = npvGen2GetStr(ws, "path")
+            netHost = npvGen2GetStr(ws, "host")
+        case "grpc":
+            netPath = npvGen2GetStr(grpc, "serviceName")
+        }
+        sni := npvGen2GetStr(tls, "serverName")
+        tlsFlag := ""
+        if security == "tls" || security == "reality" {
+            tlsFlag = "tls"
+        }
+        obj := map[string]string{
+            "v": "2", "ps": rem, "add": host, "port": strconv.Itoa(port),
+            "id": uuid, "aid": "0", "scy": npvGen2Or(method, "auto"),
+            "net": network, "type": "none", "host": netHost, "path": netPath,
+            "tls": tlsFlag, "sni": sni,
+        }
+        b, err := json.Marshal(obj)
+        if err != nil {
+            return ""
+        }
+        return "vmess://" + base64.StdEncoding.EncodeToString(b)
+    }
+    return ""
+}
+
 // ─── ساخت لینک‌ها ───
 
 func npvGen2Links(fields map[uint16][]byte) ([]string, error) {
@@ -416,28 +630,7 @@ func npvGen2Links(fields map[uint16][]byte) ([]string, error) {
     return links, nil
 }
 
-// 🆕 npvGen2TryText — از یک متن (JSON یا هر چیز) لینک بساز؛ سه مسیر
-func npvGen2TryText(s string) []string {
-    if strings.TrimSpace(s) == "" {
-        return nil
-    }
-    clean := cleanEmbeddedJSON(s)
-    // مسیر ۱: پارس ساختاری (JSON استاندارد با پورت عددی)
-    if uris, err := extractURIsFromConfig(clean); err == nil && len(uris) > 0 {
-        return uris
-    }
-    // مسیر ۲: regex روی نسخه تمیز — پورت رشته‌ای ("443") را هم می‌فهمد
-    if uris := regexExtractFromText(string(clean)); len(uris) > 0 {
-        return uris
-    }
-    // مسیر ۳: regex روی متن خام (حتی با escape های \\")
-    if uris := regexExtractFromText(s); len(uris) > 0 {
-        return uris
-    }
-    return nil
-}
-
-// 🆕 npvGen2Link — ۵ لایه + دیباگ داخلی در fallback
+// 🆕 npvGen2Link — ۵ لایه: پارسر مستقیم v2ray → پروفایل‌ها → ssh/proxy → regex → KeyValues
 func npvGen2Link(cfg any) string {
     obj, ok := cfg.(map[string]any)
     if !ok {
@@ -446,36 +639,31 @@ func npvGen2Link(cfg any) string {
     remarks := npvGen2Text(obj["name"])
     address := npvGen2Text(obj["address"])
 
-    dbg := []string{fmt.Sprintf("keys=%d", len(obj))}
-
-    // ─── لایه ۱+۲: v2rayJson / v2rRawJson — رشته یا آبجکت ───
+    // 🥇 لایه ۱: پارسر مستقیم v2rayJson — پورت رشته‌ای هم می‌فهمد
     for _, key := range []string{"v2rayJson", "v2rRawJson"} {
-        v, exists := obj[key]
-        if !exists {
-            dbg = append(dbg, key+"=none")
-            continue
-        }
-        switch vj := v.(type) {
-        case string:
-            dbg = append(dbg, key+"=str("+strconv.Itoa(len(vj))+")")
-            if uris := npvGen2TryText(vj); len(uris) > 0 {
-                return strings.Join(uris, "\n")
-            }
-        case map[string]any:
-            dbg = append(dbg, key+"=map")
-            if b, err := json.Marshal(vj); err == nil {
-                if uris := npvGen2TryText(string(b)); len(uris) > 0 {
-                    return strings.Join(uris, "\n")
-                }
-            }
-        default:
-            dbg = append(dbg, key+"=other")
+        if uris := npvGen2V2RayJSONLinks(obj[key]); len(uris) > 0 {
+            log.Printf("[NPVS-GEN2] لینک‌ها از پارسر مستقیم v2ray (%s)", key)
+            return strings.Join(uris, "\n")
         }
     }
 
-    // ─── لایه ۳: پروفایل‌های ساختاری ───
+    // لایه ۲: موتورهای موجود main.go (به‌عنوان پشتیبان)
+    for _, key := range []string{"v2rayJson", "v2rRawJson"} {
+        if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
+            clean := cleanEmbeddedJSON(vj)
+            if uris, err := extractURIsFromConfig(clean); err == nil && len(uris) > 0 {
+                log.Printf("[NPVS-GEN2] لینک‌ها از extractURIsFromConfig (%s)", key)
+                return strings.Join(uris, "\n")
+            }
+            if uris := regexExtractFromText(string(clean)); len(uris) > 0 {
+                log.Printf("[NPVS-GEN2] لینک‌ها از regex (%s)", key)
+                return strings.Join(uris, "\n")
+            }
+        }
+    }
+
+    // لایه ۳: پروفایل‌های ساختاری
     if profile, ok := obj["v2rayProfile"].(map[string]any); ok {
-        dbg = append(dbg, "profile=yes")
         return npvGen2V2RayLink(remarks, address, npvGen2FlatMap(profile))
     }
     if ssh, ok := obj["sshConfig"].(map[string]any); ok {
@@ -487,41 +675,15 @@ func npvGen2Link(cfg any) string {
         }
     }
 
-    // ─── لایه ۴: اسکن تک‌تک مقادیر — هر رشته/map که protocol دارد ───
-    scanCount := 0
-    for k, v := range obj {
-        switch tv := v.(type) {
-        case string:
-            if len(tv) > 40 && (strings.Contains(tv, `"protocol"`) || strings.Contains(tv, `\"protocol\"`)) {
-                scanCount++
-                if uris := npvGen2TryText(tv); len(uris) > 0 {
-                    return strings.Join(uris, "\n")
-                }
-            }
-        case map[string]any:
-            if b, err := json.Marshal(tv); err == nil && len(b) > 40 && bytes.Contains(b, []byte(`"protocol"`)) {
-                scanCount++
-                if uris := npvGen2TryText(string(b)); len(uris) > 0 {
-                    return strings.Join(uris, "\n")
-                }
-            }
-        }
-        _ = k
-    }
-    dbg = append(dbg, fmt.Sprintf("scan=%d", scanCount))
-
-    // ─── لایه ۵: regex روی کل آبجکت ───
-    nProto := 0
+    // لایه ۴: اسکن کل آبجکت با regex
     if b, err := json.Marshal(obj); err == nil {
-        nProto = len(reProtocol.FindAllStringIndex(string(b), -1))
         if uris := regexExtractFromText(string(b)); len(uris) > 0 {
+            log.Printf("[NPVS-GEN2] لینک‌ها از اسکن کل آبجکت")
             return strings.Join(uris, "\n")
         }
     }
-    dbg = append(dbg, fmt.Sprintf("proto=%d", nProto))
 
-    // ─── fallback با دیباگ ───
-    return "🔎[" + strings.Join(dbg, " ") + "] " + npvGen2KeyValues(npvGen2FlatMap(obj))
+    return npvGen2KeyValues(npvGen2FlatMap(obj))
 }
 
 func npvGen2V2RayLink(remarks, address string, p map[string]string) string {
@@ -531,13 +693,13 @@ func npvGen2V2RayLink(remarks, address string, p map[string]string) string {
         port = npvGen2Int(p["port"])
     }
     switch npvGen2Int(p["configType"]) {
-    case npvGen2TypeVMess:
+    case 1:
         return npvGen2VMessLink(host, port, remarks, p)
-    case npvGen2TypeVLESS:
+    case 5:
         return npvGen2VLESSLink(host, port, remarks, p)
-    case npvGen2TypeTrojan:
+    case 6:
         return npvGen2TrojanLink(host, port, remarks, p)
-    case npvGen2TypeShadowsocks:
+    case 3:
         return npvGen2ShadowsocksLink(host, port, remarks, p)
     }
     return npvGen2KeyValues(p)
@@ -845,8 +1007,10 @@ func (e *npvGen2Envelope) creatorMessage(metadata []byte) string {
         return ""
     }
     var parts []string
+    seen := map[string]bool{}
     for _, m := range []string{meta.Policy.DisplayMessage, meta.Policy.CustomServerMessage} {
-        if m = strings.TrimSpace(strings.ReplaceAll(m, "\r\n", "\n")); m != "" {
+        if m = strings.TrimSpace(strings.ReplaceAll(m, "\r\n", "\n")); m != "" && !seen[m] {
+            seen[m] = true
             parts = append(parts, m)
         }
     }
@@ -925,6 +1089,7 @@ func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err 
             }
         }
         res.URIs = dedupeByURI(flat)
+        log.Printf("[NPVS-GEN2] ✅ %d لینک تولید شد", len(res.URIs))
         return res, nil
     }
     if text := npvGen2RawFields(fields); text != "" {
