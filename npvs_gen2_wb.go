@@ -54,7 +54,8 @@ func npvGen2GetTablesZ() ([]byte, error) {
         "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
     }
     for _, url := range urls {
-        if b, err := fetchURL(url); err == nil && len(b) > 1000 {
+        b, err := fetchURL(url)
+        if err == nil && len(b) > 1000 {
             _ = os.WriteFile(cache, b, 0644)
             log.Printf("[NPVS-GEN2] ✅ جدول از %s دانلود شد (%d بایت)", url, len(b))
             return b, nil
