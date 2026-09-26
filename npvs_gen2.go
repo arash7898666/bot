@@ -1,6 +1,7 @@
 package main
 
 import (
+    "bytes"
     "crypto/sha256"
     "encoding/base64"
     "encoding/binary"
@@ -123,7 +124,6 @@ func npvsOpenDecrypt(data []byte) (*processResult, error) {
     }
     res := &processResult{}
     for _, cfg := range env.Configs {
-        // هر کانفیگ ممکن است چند لینک (با \n) برگرداند → flat می‌کنیم
         for _, l := range strings.Split(npvGen2Link(npvOpenDecodeSentinels(cfg)), "\n") {
             if p := strings.TrimSpace(l); p != "" {
                 res.URIs = append(res.URIs, p)
@@ -416,7 +416,28 @@ func npvGen2Links(fields map[uint16][]byte) ([]string, error) {
     return links, nil
 }
 
-// 🆕 تبدیل به لینک — v2rayJson (رشته JSON توکار) + fallback regex
+// 🆕 npvGen2TryText — از یک متن (JSON یا هر چیز) لینک بساز؛ سه مسیر
+func npvGen2TryText(s string) []string {
+    if strings.TrimSpace(s) == "" {
+        return nil
+    }
+    clean := cleanEmbeddedJSON(s)
+    // مسیر ۱: پارس ساختاری (JSON استاندارد با پورت عددی)
+    if uris, err := extractURIsFromConfig(clean); err == nil && len(uris) > 0 {
+        return uris
+    }
+    // مسیر ۲: regex روی نسخه تمیز — پورت رشته‌ای ("443") را هم می‌فهمد
+    if uris := regexExtractFromText(string(clean)); len(uris) > 0 {
+        return uris
+    }
+    // مسیر ۳: regex روی متن خام (حتی با escape های \\")
+    if uris := regexExtractFromText(s); len(uris) > 0 {
+        return uris
+    }
+    return nil
+}
+
+// 🆕 npvGen2Link — ۵ لایه + دیباگ داخلی در fallback
 func npvGen2Link(cfg any) string {
     obj, ok := cfg.(map[string]any)
     if !ok {
@@ -425,22 +446,36 @@ func npvGen2Link(cfg any) string {
     remarks := npvGen2Text(obj["name"])
     address := npvGen2Text(obj["address"])
 
-    // v2rayJson / v2rRawJson — رشته JSON توکار (فرمت رایج اپ NPV Tunnel)
+    dbg := []string{fmt.Sprintf("keys=%d", len(obj))}
+
+    // ─── لایه ۱+۲: v2rayJson / v2rRawJson — رشته یا آبجکت ───
     for _, key := range []string{"v2rayJson", "v2rRawJson"} {
-        if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
-            clean := cleanEmbeddedJSON(vj)
-            // مسیر ۱: پارس ساختاری (JSONهای استاندارد با پورت عددی)
-            if uris, err := extractURIsFromConfig(clean); err == nil && len(uris) > 0 {
+        v, exists := obj[key]
+        if !exists {
+            dbg = append(dbg, key+"=none")
+            continue
+        }
+        switch vj := v.(type) {
+        case string:
+            dbg = append(dbg, key+"=str("+strconv.Itoa(len(vj))+")")
+            if uris := npvGen2TryText(vj); len(uris) > 0 {
                 return strings.Join(uris, "\n")
             }
-            // مسیر ۲: استخراج regex — پورت‌های رشته‌ای ("443") را هم می‌فهمد
-            if uris := regexExtractFromText(string(clean)); len(uris) > 0 {
-                return strings.Join(uris, "\n")
+        case map[string]any:
+            dbg = append(dbg, key+"=map")
+            if b, err := json.Marshal(vj); err == nil {
+                if uris := npvGen2TryText(string(b)); len(uris) > 0 {
+                    return strings.Join(uris, "\n")
+                }
             }
+        default:
+            dbg = append(dbg, key+"=other")
         }
     }
 
+    // ─── لایه ۳: پروفایل‌های ساختاری ───
     if profile, ok := obj["v2rayProfile"].(map[string]any); ok {
+        dbg = append(dbg, "profile=yes")
         return npvGen2V2RayLink(remarks, address, npvGen2FlatMap(profile))
     }
     if ssh, ok := obj["sshConfig"].(map[string]any); ok {
@@ -451,7 +486,42 @@ func npvGen2Link(cfg any) string {
             return npvGen2ProxyText(remarks, address, kind, npvGen2FlatMap(sub))
         }
     }
-    return npvGen2KeyValues(npvGen2FlatMap(obj))
+
+    // ─── لایه ۴: اسکن تک‌تک مقادیر — هر رشته/map که protocol دارد ───
+    scanCount := 0
+    for k, v := range obj {
+        switch tv := v.(type) {
+        case string:
+            if len(tv) > 40 && (strings.Contains(tv, `"protocol"`) || strings.Contains(tv, `\"protocol\"`)) {
+                scanCount++
+                if uris := npvGen2TryText(tv); len(uris) > 0 {
+                    return strings.Join(uris, "\n")
+                }
+            }
+        case map[string]any:
+            if b, err := json.Marshal(tv); err == nil && len(b) > 40 && bytes.Contains(b, []byte(`"protocol"`)) {
+                scanCount++
+                if uris := npvGen2TryText(string(b)); len(uris) > 0 {
+                    return strings.Join(uris, "\n")
+                }
+            }
+        }
+        _ = k
+    }
+    dbg = append(dbg, fmt.Sprintf("scan=%d", scanCount))
+
+    // ─── لایه ۵: regex روی کل آبجکت ───
+    nProto := 0
+    if b, err := json.Marshal(obj); err == nil {
+        nProto = len(reProtocol.FindAllStringIndex(string(b), -1))
+        if uris := regexExtractFromText(string(b)); len(uris) > 0 {
+            return strings.Join(uris, "\n")
+        }
+    }
+    dbg = append(dbg, fmt.Sprintf("proto=%d", nProto))
+
+    // ─── fallback با دیباگ ───
+    return "🔎[" + strings.Join(dbg, " ") + "] " + npvGen2KeyValues(npvGen2FlatMap(obj))
 }
 
 func npvGen2V2RayLink(remarks, address string, p map[string]string) string {
@@ -815,10 +885,8 @@ func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err 
     var fields map[uint16][]byte
 
     if env.method == npvGen2MethodAppKey {
-        // متد ۲: بدون رمز
         metadata, fields, err = env.open("")
     } else {
-        // متد ۱: variant های رمز
         trimmed := strings.TrimSpace(password)
         noDash := strings.ReplaceAll(trimmed, "-", "")
         attempts := []string{trimmed, noDash, strings.ToUpper(noDash), strings.ToLower(noDash)}
@@ -848,7 +916,6 @@ func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err 
         return nil, lerr
     }
     if len(links) > 0 {
-        // هر کانفیگ ممکن است چند لینک (با \n) برگرداند → flat می‌کنیم
         var flat []string
         for _, l := range links {
             for _, part := range strings.Split(l, "\n") {
