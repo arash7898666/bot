@@ -123,8 +123,14 @@ func npvsOpenDecrypt(data []byte) (*processResult, error) {
     }
     res := &processResult{}
     for _, cfg := range env.Configs {
-        res.URIs = append(res.URIs, npvGen2Link(npvOpenDecodeSentinels(cfg)))
+        // هر کانفیگ ممکن است چند لینک (با \n) برگرداند → flat می‌کنیم
+        for _, l := range strings.Split(npvGen2Link(npvOpenDecodeSentinels(cfg)), "\n") {
+            if p := strings.TrimSpace(l); p != "" {
+                res.URIs = append(res.URIs, p)
+            }
+        }
     }
+    res.URIs = dedupeByURI(res.URIs)
     return res, nil
 }
 
@@ -159,36 +165,24 @@ func (e *npvGen2Envelope) unlockHint(err error) error {
     }
     return err
 }
-func npvGen2Link(cfg any) string {
-    obj, ok := cfg.(map[string]any)
-    if !ok {
-        return npvGen2Text(cfg)
-    }
-    remarks := npvGen2Text(obj["name"])
-    address := npvGen2Text(obj["address"])
 
-    // 🆕 v2rayJson / v2rRawJson — رشته JSON توکار (فرمت رایج اپ NPV Tunnel)
-    // با موتور موجود main.go تبدیل به vless/vmess/trojan/ss می‌شود
-    for _, key := range []string{"v2rayJson", "v2rRawJson"} {
-        if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
-            if uris, err := extractURIsFromConfig(cleanEmbeddedJSON(vj)); err == nil && len(uris) > 0 {
-                return strings.Join(uris, "\n")
-            }
-        }
-    }
+type npvGen2Field struct {
+    seq   uint16
+    flags uint16
+    blob  []byte
+}
 
-    if profile, ok := obj["v2rayProfile"].(map[string]any); ok {
-        return npvGen2V2RayLink(remarks, address, npvGen2FlatMap(profile))
-    }
-    if ssh, ok := obj["sshConfig"].(map[string]any); ok {
-        return npvGen2SSHText(remarks, npvGen2FlatMap(ssh))
-    }
-    for _, kind := range []string{"socksConfig", "socksProfile", "httpConfig", "httpProfile", "proxyConfig"} {
-        if sub, ok := obj[kind].(map[string]any); ok {
-            return npvGen2ProxyText(remarks, address, kind, npvGen2FlatMap(sub))
-        }
-    }
-    return npvGen2KeyValues(npvGen2FlatMap(obj))
+type npvGen2MetadataPolicy struct {
+    AttestationLevel    string `json:"attestationLevel"`
+    ConfigVersion       int    `json:"configVersion"`
+    CustomServerMessage string `json:"customServerMessage"`
+    DisplayMessage      string `json:"displayMessage"`
+    OnlyMobileNetwork   bool   `json:"onlyMobileNetwork"`
+}
+
+type npvGen2Metadata struct {
+    IssuedAt string                `json:"issuedAt"`
+    Policy   npvGen2MetadataPolicy `json:"policy"`
 }
 
 func isNpvGen2Envelope(b []byte) bool {
@@ -283,7 +277,7 @@ func parseNpvGen2Envelope(b []byte) (*npvGen2Envelope, error) {
     return e, nil
 }
 
-// ─── باز کردن Gen2 — هر ۳ متد ───
+// ─── باز کردن Gen2 — متدهای ۱ و ۲ ───
 
 func (e *npvGen2Envelope) open(passphrase string) (metadata []byte, fields map[uint16][]byte, err error) {
     var kdk []byte
@@ -422,6 +416,7 @@ func npvGen2Links(fields map[uint16][]byte) ([]string, error) {
     return links, nil
 }
 
+// 🆕 تبدیل به لینک — v2rayJson (رشته JSON توکار) هم پشتیبانی می‌شود
 func npvGen2Link(cfg any) string {
     obj, ok := cfg.(map[string]any)
     if !ok {
@@ -429,6 +424,16 @@ func npvGen2Link(cfg any) string {
     }
     remarks := npvGen2Text(obj["name"])
     address := npvGen2Text(obj["address"])
+
+    // v2rayJson / v2rRawJson — رشته JSON توکار (فرمت رایج اپ NPV Tunnel)
+    // با موتور موجود main.go به vless/vmess/trojan/ss تبدیل می‌شود
+    for _, key := range []string{"v2rayJson", "v2rRawJson"} {
+        if vj, ok := obj[key].(string); ok && strings.TrimSpace(vj) != "" {
+            if uris, err := extractURIsFromConfig(cleanEmbeddedJSON(vj)); err == nil && len(uris) > 0 {
+                return strings.Join(uris, "\n")
+            }
+        }
+    }
 
     if profile, ok := obj["v2rayProfile"].(map[string]any); ok {
         return npvGen2V2RayLink(remarks, address, npvGen2FlatMap(profile))
@@ -838,7 +843,16 @@ func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err 
         return nil, lerr
     }
     if len(links) > 0 {
-        res.URIs = dedupeByURI(links)
+        // هر کانفیگ ممکن است چند لینک (با \n) برگرداند → flat می‌کنیم
+        var flat []string
+        for _, l := range links {
+            for _, part := range strings.Split(l, "\n") {
+                if p := strings.TrimSpace(part); p != "" {
+                    flat = append(flat, p)
+                }
+            }
+        }
+        res.URIs = dedupeByURI(flat)
         return res, nil
     }
     if text := npvGen2RawFields(fields); text != "" {
