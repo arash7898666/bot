@@ -33,18 +33,35 @@ func npvGen2GetTablesZ() ([]byte, error) {
         if p == "" {
             continue
         }
-        if b, err := os.ReadFile(p + "/gen2_tables.bin.z"); err == nil && len(b) > 1000 {
+        full := p + "/gen2_tables.bin.z"
+        if b, err := os.ReadFile(full); err == nil && len(b) > 1000 {
             _ = os.WriteFile(cache, b, 0644)
+            log.Printf("[NPVS-GEN2] جدول از %s لود شد (%d بایت)", full, len(b))
             return b, nil
         }
     }
-    for _, u := range npvsRepoBases {
-        if b, err := fetchURL(u + "gen2_tables.bin.z"); err == nil && len(b) > 1000 {
+
+    // 🔍 همه مسیرهای محتمل — ✅ ریپوی اصلی: FrontierTM/Pantegnos
+    urls := []string{
+        "https://raw.githubusercontent.com/FrontierTM/Pantegnos/main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/master/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/main/assets/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/master/assets/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/main/npvs/gen2_tables.bin.z",
+        "https://raw.githubusercontent.com/KernelDotDLL/Pantegnos/master/npvs/gen2_tables.bin.z",
+        "https://cdn.jsdelivr.net/gh/FrontierTM/Pantegnos@main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
+        "https://cdn.jsdelivr.net/gh/KernelDotDLL/Pantegnos@main/internal/modules/impl/assets/npvs/gen2_tables.bin.z",
+    }
+    for _, url := range urls {
+        if b, err := fetchURL(url); err == nil && len(b) > 1000 {
             _ = os.WriteFile(cache, b, 0644)
+            log.Printf("[NPVS-GEN2] ✅ جدول از %s دانلود شد (%d بایت)", url, len(b))
             return b, nil
         }
+        log.Printf("[NPVS-GEN2] ❌ %s → err=%v len=%d", url, err, len(b))
     }
-    return nil, fmt.Errorf("gen2_tables.bin.z یافت نشد (محلی و گیت‌هاب)")
+    return nil, fmt.Errorf("gen2_tables.bin.z از هیچ مسیری دریافت نشد — لینک Raw را دستی بده")
 }
 
 var (
