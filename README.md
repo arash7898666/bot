@@ -4,6 +4,14 @@
 
     ⚠️ Disclaimer: این ابزار برای رمزگشایی کانفیگ‌هایی است که خودتان ساخته‌اید یا رمز آن‌ها به‌صورت عمومی منتشر شده است. مسئولیت نحوه استفاده با کاربر است.
 
+⚡ نصب سریع (Quick Start)
+
+🐳 Docker — همه در یک خط:
+
+git clone https://github.com/arash7898666/bot.git && cd bot && docker build -t npvtbot . && docker run -d --name npvtbot -e BOT_TOKEN="توکن_ربات" -e ADMIN_IDS="آیدی_ادمین" -v $(pwd)/data:/app/data --restart unless-stopped npvtbot
+
+☁️ Render — بدون سرور:Fork این ریپو → در Render یک Web Service بساز → متغیرهای BOT_TOKEN و ADMIN_IDS را اضافه کن → تمام. 🎉
+📖 راهنمای کامل نصب (VPS سه روش + Render + systemd)
 📋 فرمت‌های پشتیبانی‌شده
 🟢 NPV Tunnel (کامل)
 فرمت	نوع قفل	نیاز به رمز
@@ -61,7 +69,7 @@ PORT	اختیاری	پورت health-check (پیش‌فرض 8080)
 
 مدیریت:
 
-docker logs -f npvtbot        # لاگ زندهdocker restart npvtbot        # ری‌استارتdocker stop npvtbot && docker rm npvtbot   # حذف
+docker logs -f npvtbot                      # لاگ زندهdocker restart npvtbot                      # ری‌استارتdocker stop npvtbot && docker rm npvtbot    # حذف
 
 روش ۲ — مستقیم با Go
 
