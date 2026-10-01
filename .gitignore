@@ -1,0 +1,5 @@
+npvs_cache_*
+bot_settings.json
+bot_stats.json
+*.log
+data/
