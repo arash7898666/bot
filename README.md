@@ -10,8 +10,9 @@
 
 git clone https://github.com/arash7898666/bot.git && cd bot && docker build -t npvtbot . && docker run -d --name npvtbot -e BOT_TOKEN="توکن_ربات" -e ADMIN_IDS="آیدی_ادمین" -v $(pwd)/data:/app/data --restart unless-stopped npvtbot
 
-☁️ Render — بدون سرور:Fork این ریپو → در Render یک Web Service بساز → متغیرهای BOT_TOKEN و ADMIN_IDS را اضافه کن → تمام. 🎉
-📖 راهنمای کامل نصب (VPS سه روش + Render + systemd)
+☁️ Render — بدون سرور:Fork این ریپو → در Render یک Web Service بساز → متغیرهای BOT_TOKEN و ADMIN_IDS را اضافه کن → تمام 🎉
+
+راهنمای کامل: بخش‌های «نصب روی VPS» و «نصب روی Render» در پایین.
 📋 فرمت‌های پشتیبانی‌شده
 🟢 NPV Tunnel (کامل)
 فرمت	نوع قفل	نیاز به رمز
@@ -65,7 +66,17 @@ PORT	اختیاری	پورت health-check (پیش‌فرض 8080)
 🐳 نصب روی VPS
 روش ۱ — Docker (پیشنهادی)
 
-# نصب داکر (اگر ندارید)curl -fsSL https://get.docker.com | sh# دریافت و بیلدgit clone https://github.com/arash7898666/bot.gitcd botdocker build -t npvtbot .# اجراdocker run -d --name npvtbot \  -e BOT_TOKEN="123456:ABC-DEF..." \  -e ADMIN_IDS="123456789" \  -v $(pwd)/data:/app/data \  --restart unless-stopped \  npvtbot
+نصب داکر (اگر ندارید):
+
+curl -fsSL https://get.docker.com | sh
+
+دریافت و بیلد:
+
+git clone https://github.com/arash7898666/bot.gitcd botdocker build -t npvtbot .
+
+اجرا:
+
+docker run -d --name npvtbot \  -e BOT_TOKEN="123456:ABC-DEF..." \  -e ADMIN_IDS="123456789" \  -v $(pwd)/data:/app/data \  --restart unless-stopped \  npvtbot
 
 مدیریت:
 
@@ -73,9 +84,13 @@ docker logs -f npvtbot                      # لاگ زندهdocker restart npvt
 
 روش ۲ — مستقیم با Go
 
-# Go 1.22+ لازم استgit clone https://github.com/arash7898666/bot.git && cd botgo mod tidygo build -o npvtbot .BOT_TOKEN="123456:ABC-DEF..." ADMIN_IDS="123456789" ./npvtbot
+نیازمند Go 1.22+ :
+
+git clone https://github.com/arash7898666/bot.git && cd botgo mod tidygo build -o npvtbot .BOT_TOKEN="123456:ABC-DEF..." ADMIN_IDS="123456789" ./npvtbot
 
 روش ۳ — systemd (اجرای دائمی)
+
+فایل سرویس بسازید:
 
 sudo nano /etc/systemd/system/npvtbot.service
 
@@ -92,24 +107,22 @@ sudo mkdir -p /opt/bot# باینری npvtbot و فایل‌های پروژه ر�
     این ریپو را Fork کنید
     در Render Dashboard → New → Web Service
     ریپو را وصل کنید — Runtime: Docker
-    در بخش Environment این متغیرها را اضافه کنید:
-        BOT_TOKEN = توکن ربات
-        ADMIN_IDS = آیدی ادمین
+    در بخش Environment این متغیرها را اضافه کنید: BOT_TOKEN و ADMIN_IDS
     Create Web Service — دیپلوی خودکار شروع می‌شود
 
 ⚠️ نکات مهم Render:
 
-    فقط یک سرویس با یک توکن اجرا کنید — اجرای دوتایی خطای Conflict: terminated by other getUpdates می‌دهد
+    فقط یک سرویس با یک توکن اجرا کنید — اجرای دوتایی خطای Conflict می‌دهد
     پلن Free خواب می‌رود؛ برای ربات فعال پلن پولی بهتر است
-    کش جداول بعد از هر دیپلوی پاک می‌شود و خودکار دوباره دانلود می‌شود (بی‌ضرر)
+    کش جداول بعد از هر دیپلوی پاک و خودکار دوباره دانلود می‌شود (بی‌ضرر)
 
 🔄 جداول رمزنگاری (White-Box)
 
-برای بازکردن قفل‌های «بدون رمز»، ربات به جداول white-box نیاز دارد (نسل ۱ و ۲). در اولین اجرا خودکار از Pantegnos دانلود و در npvs_cache_*.bin کش می‌شوند.
+برای بازکردن قفل‌های «بدون رمز»، ربات به جداول white-box نیاز دارد (نسل ۱ و ۲). در اولین اجرا خودکار از Pantegnos دانلود و در فایل‌های npvs_cache_* کش می‌شوند.
 
 اگر سرور اینترنت خروجی ندارد: فایل‌ها را دستی از مسیر internal/modules/impl/assets/npvs/ ریپوی Pantegnos بردارید و کنار باینری در پوشه npvs/ بگذارید.
 
-سلامت جداول در لاگ استارتاپ نمایش داده می‌شود:
+سلامت جداول در لاگ استارتاپ:
 
 🧪 WB SelfTest: 2/2 KDK درست✅ جداول Gen2 White-Box آماده شد (749568 بایت)
 
