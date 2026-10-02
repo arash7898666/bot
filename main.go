@@ -658,11 +658,21 @@ func helpText() string {
 func formatsText() string {
     return `📋 <b>فرمت‌های پشتیبانی‌شده:</b>
 
-<code>.npvt</code> <code>.npvs</code> <code>.ehi</code>
-<code>.hat</code> <code>.happ</code> <code>.slip</code>
-<code>.nm</code> <code>.dark</code>
+🟢 <b>NPV Tunnel (کامل):</b>
+<code>.npvt</code> — رمزنگاری whitebox
+<code>.npvs</code> v1 — Passphrase / AppKey
+<code>.npvs</code> v5 — 🔑 Passphrase
+<code>.npvs</code> v5 — 👥 Anyone with the app
+<code>.npvs</code> v5 — 🔓 Keep open
+<code>.npvs</code> v5 — 👤 Specific people (فقط گیرنده)
 
-📥 JSON / base64 / ZIP / لینک‌های خام`
+🟢 <b>سایر اپ‌ها:</b>
+<code>.ehi</code> <code>.hat</code> <code>.happ</code>
+<code>.slip</code> <code>.nm</code> <code>.dark</code>
+
+📥 <b>عمومی:</b>
+ZIP (تو در تو) • JSON • base64 • hex
+لینک خام: vless/vmess/trojan/ss/ssr/hy2/tuic`
 }
 
 // ═══════════════════ موتور پردازش ═══════════════════
@@ -824,6 +834,11 @@ func tryNPVT(text string) *processResult {
 // ═══════════════════ مصرف JSON (با fallback Regex) ═══════════════════
 
 func consumeJSONBlob(pt []byte, res *processResult) {
+    // 🆕 NPV Tunnel بخش‌هایی از JSON را با sentinel (npvs1:...) پنهان می‌کند
+    // بدون decode، v2rayJson ناقص می‌ماند و استخراج به لینک اشتباه می‌افتد
+    if bytes.Contains(pt, []byte(npvSentinelPrefix)) {
+        pt = []byte(decodeNpvSentinels(string(pt)))
+    }
     pt = trimNonPrintable(pt)
     if len(pt) == 0 {
         return
