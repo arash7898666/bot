@@ -21,7 +21,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "8.0-SPEED"
+const botVersion = "8.1-SENTINEL"
 
 const (
     msgLimit    = 3900
@@ -248,7 +248,7 @@ func main() {
     loadState()
     startStatsFlusher()
     startPassReaper()
-    preloadNPVS() // ⚡ جداول NPVS از قبل آماده می‌شوند
+    preloadNPVS()
 
     var err error
     bot, err = tgbotapi.NewBotAPI(token)
@@ -831,14 +831,9 @@ func tryNPVT(text string) *processResult {
     return res
 }
 
-// ═══════════════════ مصرف JSON (با fallback Regex) ═══════════════════
+// ═══════════════════ مصرف JSON ═══════════════════
 
 func consumeJSONBlob(pt []byte, res *processResult) {
-    // 🆕 NPV Tunnel بخش‌هایی از JSON را با sentinel (npvs1:...) پنهان می‌کند
-    // بدون decode، v2rayJson ناقص می‌ماند و استخراج به لینک اشتباه می‌افتد
-    if bytes.Contains(pt, []byte(npvSentinelPrefix)) {
-        pt = []byte(decodeNpvSentinels(string(pt)))
-    }
     pt = trimNonPrintable(pt)
     if len(pt) == 0 {
         return
@@ -1244,6 +1239,16 @@ func ctrIncrement(counter *[16]byte) {
     }
 }
 
+// ═══════════════════ Sentinel helpers ═══════════════════
+
+// 🆕 decode امن روی رشته‌های تکی (فیلد به فیلد — نه کل JSON!)
+func npvDecodeSentinelsStr(s string) string {
+    if strings.Contains(s, npvSentinelPrefix) {
+        return decodeNpvSentinels(s)
+    }
+    return s
+}
+
 // ═══════════════════ پیمایش JSON ═══════════════════
 
 func cleanEmbeddedJSON(c string) []byte {
@@ -1280,31 +1285,52 @@ func cleanEmbeddedJSON(c string) []byte {
     return []byte(c3)
 }
 
+// 🆕 walkJSON — حالا sentinel-aware: هر شاخه قبل از Marshal/parse فیلدهایش decode می‌شود
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
         if raw, ok := x["v2rayJson"]; ok {
-            if c, ok := raw.(string); ok && c != "" {
-                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+            switch c := raw.(type) {
+            case string:
+                if c != "" {
+                    // 🆕 decode sentinel روی رشته v2rayJson (محتوای آن ممکن است JSON کامل باشد)
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(npvDecodeSentinelsStr(c))); err == nil {
+                        *uris = append(*uris, u...)
+                    }
+                }
+            case map[string]any:
+                // 🆕 v2rayJson به‌صورت آبجکت توکار
+                b, _ := json.Marshal(npvOpenDecodeSentinels(c))
+                if u, err := extractURIsFromConfig(b); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
         }
         if raw, ok := x["v2rRawJson"]; ok {
-            if c, ok := raw.(string); ok && c != "" {
-                if u, err := extractURIsFromConfig(cleanEmbeddedJSON(c)); err == nil {
+            switch c := raw.(type) {
+            case string:
+                if c != "" {
+                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(npvDecodeSentinelsStr(c))); err == nil {
+                        *uris = append(*uris, u...)
+                    }
+                }
+            case map[string]any:
+                b, _ := json.Marshal(npvOpenDecodeSentinels(c))
+                if u, err := extractURIsFromConfig(b); err == nil {
                     *uris = append(*uris, u...)
                 }
             }
         }
         if _, ok := x["outbounds"]; ok {
-            b, _ := json.Marshal(x)
+            // 🆕 decode فیلد‌ها قبل از Marshal (نه روی متن خام!)
+            b, _ := json.Marshal(npvOpenDecodeSentinels(x))
             if u, err := extractURIsFromConfig(b); err == nil {
                 *uris = append(*uris, u...)
             }
         }
         if _, ok := x["v2rayProfile"]; ok {
-            b, _ := json.Marshal(x)
+            // 🆕 پروفایل کامل: فیلد‌ها (شامل v2rayJson) decode می‌شوند
+            b, _ := json.Marshal(npvOpenDecodeSentinels(x))
             if u, err := extractFromV2rayProfile(b); err == nil {
                 *uris = append(*uris, u...)
             }
@@ -1407,13 +1433,13 @@ type serversSettingsT struct {
 }
 
 type napsternetProfile struct {
-    ConfigType int    `json:"configType"`
-    Remarks    string `json:"remarks"`
-    Server     string `json:"server"`
-    ServerPort any    `json:"serverPort"`
-    Password   string `json:"password"`
-    Method     string `json:"method"`
-    V2rayJson  string `json:"v2rayJson"`
+    ConfigType int             `json:"configType"`
+    Remarks    string          `json:"remarks"`
+    Server     string          `json:"server"`
+    ServerPort any             `json:"serverPort"`
+    Password   string          `json:"password"`
+    Method     string          `json:"method"`
+    V2rayJson  json.RawMessage `json:"v2rayJson"` // 🆕 رشته یا آبجکت هر دو
 }
 
 func getPortString(p any) string {
@@ -1733,36 +1759,44 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
+// 🆕 extractFromV2rayProfile — v2rayJson رشته/آبجکت + sentinel + fallback اصلاح‌شده
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
     _ = json.Unmarshal(b, &p)
 
-    if p.Server == "" && p.V2rayJson == "" {
+    if len(p.V2rayJson) == 0 && p.Server == "" {
         var wrapper struct {
             V2rayProfile napsternetProfile `json:"v2rayProfile"`
         }
         _ = json.Unmarshal(b, &wrapper)
-        if wrapper.V2rayProfile.Server != "" || wrapper.V2rayProfile.V2rayJson != "" {
+        if len(wrapper.V2rayProfile.V2rayJson) > 0 || wrapper.V2rayProfile.Server != "" {
             p = wrapper.V2rayProfile
         }
     }
 
-    if p.V2rayJson != "" {
-        if u, err := extractURIsFromConfig(cleanEmbeddedJSON(p.V2rayJson)); err == nil && len(u) > 0 {
-            return u, nil
+    // 🥇 v2rayJson — رشته یا آبجکت (موتور مشترک با Gen2)
+    if len(p.V2rayJson) > 0 {
+        var vj any
+        if err := json.Unmarshal(p.V2rayJson, &vj); err == nil {
+            if uris := npvGen2V2RayJSONLinks(vj); len(uris) > 0 {
+                return uris, nil
+            }
         }
     }
 
-    var uris []string
-    remarks := cleanRemarks(p.Remarks)
+    // fallback: فیلدهای سطح بالا — با decode sentinel
+    server := npvDecodeSentinelsStr(p.Server)
+    password := npvDecodeSentinelsStr(p.Password)
+    method := npvDecodeSentinelsStr(p.Method)
+    remarks := cleanRemarks(npvDecodeSentinelsStr(p.Remarks))
     portStr := getPortString(p.ServerPort)
 
-    if p.Server != "" {
-        if (p.ConfigType == 3 || p.Method != "") && p.Password != "" {
-            userInfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.Password))
-            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(p.Server), portStr, remarks))
-        } else if p.ConfigType == 4 || (p.Password != "" && p.Method == "") {
-            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(p.Password), formatHost(p.Server), portStr, remarks))
+    if server != "" {
+        if (p.ConfigType == 3 || (method != "" && !strings.EqualFold(method, "none"))) && password != "" {
+            userInfo := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
+            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(server), portStr, remarks))
+        } else if p.ConfigType == 4 || (password != "" && method == "") {
+            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(password), formatHost(server), portStr, remarks))
         }
     }
 
