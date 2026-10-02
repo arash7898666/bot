@@ -1241,7 +1241,7 @@ func ctrIncrement(counter *[16]byte) {
 
 // ═══════════════════ Sentinel helpers ═══════════════════
 
-// 🆕 decode امن روی رشته‌های تکی (فیلد به فیلد — نه کل JSON!)
+// decode امن روی رشته تکی — اگر sentinel نداشت، بدون تغییر
 func npvDecodeSentinelsStr(s string) string {
     if strings.Contains(s, npvSentinelPrefix) {
         return decodeNpvSentinels(s)
@@ -1285,7 +1285,7 @@ func cleanEmbeddedJSON(c string) []byte {
     return []byte(c3)
 }
 
-// 🆕 walkJSON — حالا sentinel-aware: هر شاخه قبل از Marshal/parse فیلدهایش decode می‌شود
+// 🆕 walkJSON — sentinel-aware: هر شاخه قبل از Marshal/parse فیلدهایش decode می‌شود
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
@@ -1293,13 +1293,11 @@ func walkJSON(v any, uris *[]string) {
             switch c := raw.(type) {
             case string:
                 if c != "" {
-                    // 🆕 decode sentinel روی رشته v2rayJson (محتوای آن ممکن است JSON کامل باشد)
                     if u, err := extractURIsFromConfig(cleanEmbeddedJSON(npvDecodeSentinelsStr(c))); err == nil {
                         *uris = append(*uris, u...)
                     }
                 }
             case map[string]any:
-                // 🆕 v2rayJson به‌صورت آبجکت توکار
                 b, _ := json.Marshal(npvOpenDecodeSentinels(c))
                 if u, err := extractURIsFromConfig(b); err == nil {
                     *uris = append(*uris, u...)
@@ -1322,14 +1320,13 @@ func walkJSON(v any, uris *[]string) {
             }
         }
         if _, ok := x["outbounds"]; ok {
-            // 🆕 decode فیلد‌ها قبل از Marshal (نه روی متن خام!)
+            // 🆕 decode فیلدها قبل از Marshal — نه روی متن خام
             b, _ := json.Marshal(npvOpenDecodeSentinels(x))
             if u, err := extractURIsFromConfig(b); err == nil {
                 *uris = append(*uris, u...)
             }
         }
         if _, ok := x["v2rayProfile"]; ok {
-            // 🆕 پروفایل کامل: فیلد‌ها (شامل v2rayJson) decode می‌شوند
             b, _ := json.Marshal(npvOpenDecodeSentinels(x))
             if u, err := extractFromV2rayProfile(b); err == nil {
                 *uris = append(*uris, u...)
@@ -1785,6 +1782,7 @@ func extractFromV2rayProfile(b []byte) ([]string, error) {
     }
 
     // fallback: فیلدهای سطح بالا — با decode sentinel
+    var uris []string
     server := npvDecodeSentinelsStr(p.Server)
     password := npvDecodeSentinelsStr(p.Password)
     method := npvDecodeSentinelsStr(p.Method)
