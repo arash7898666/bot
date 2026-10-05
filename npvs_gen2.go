@@ -7,6 +7,7 @@ import (
     "encoding/json"
     "fmt"
     "io"
+    "log"
     "net/url"
     "sort"
     "strconv"
@@ -435,6 +436,18 @@ func npvGen2Frag(rem string) string {
     return "#" + url.PathEscape(rem)
 }
 
+// 🆕 npvHostFromHeadersAny — Host از headers (map[string]any) بدون حساسیت حروف
+func npvHostFromHeadersAny(h map[string]any) string {
+    for k, v := range h {
+        if strings.EqualFold(k, "Host") {
+            if s := strings.TrimSpace(npvGen2Text(v)); s != "" {
+                return s
+            }
+        }
+    }
+    return ""
+}
+
 // ─── 🆕 پارسر مستقیم v2rayJson — با پشتیبانی sentinel ───
 
 func npvGen2V2RayJSONLinks(raw any) []string {
@@ -450,7 +463,11 @@ func npvGen2V2RayJSONLinks(raw any) []string {
             return nil
         }
     case map[string]any:
-        root = npvOpenDecodeSentinels(v)
+        dec, ok := npvOpenDecodeSentinels(v).(map[string]any) // 🔧 type assertion
+        if !ok {
+            return nil
+        }
+        root = dec
     default:
         return nil
     }
@@ -544,7 +561,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         h := npvGen2GetStr(ws, "host")
         if h == "" {
             if hd := npvGen2GetMap(ws["headers"]); hd != nil {
-                h = npvHostFromHeaders(hd)
+                h = npvHostFromHeadersAny(hd) // 🔧 تابع سازگار با map[string]any
             }
         }
         if h == "" {
