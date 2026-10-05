@@ -14,6 +14,7 @@ import (
     "os"
     "path/filepath"
     "runtime/debug"
+    "strconv"
     "strings"
     "sync"
     "time"
@@ -21,7 +22,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "8.1-SENTINEL"
+const botVersion = "8.2-FULL"
 
 const (
     msgLimit    = 3900
@@ -1249,6 +1250,35 @@ func npvDecodeSentinelsStr(s string) string {
     return s
 }
 
+// ═══════════════════ 🆕 FlexInt — پورت رشته‌ای/عددی هر دو ═══════════════════
+
+type FlexInt int
+
+func (f *FlexInt) UnmarshalJSON(data []byte) error {
+    s := strings.TrimSpace(string(data))
+    if s == "null" || s == "" {
+        *f = 0
+        return nil
+    }
+    // عدد مستقیم
+    var n int
+    if err := json.Unmarshal(data, &n); err == nil {
+        *f = FlexInt(n)
+        return nil
+    }
+    // رشته
+    var str string
+    if err := json.Unmarshal(data, &str); err == nil {
+        if n, err := strconv.Atoi(strings.TrimSpace(str)); err == nil {
+            *f = FlexInt(n)
+            return nil
+        }
+    }
+    // هر چیز دیگر → صفر (soft-fail تا کل outbound رد نشود)
+    *f = 0
+    return nil
+}
+
 // ═══════════════════ پیمایش JSON ═══════════════════
 
 func cleanEmbeddedJSON(c string) []byte {
@@ -1320,7 +1350,7 @@ func walkJSON(v any, uris *[]string) {
             }
         }
         if _, ok := x["outbounds"]; ok {
-            // 🆕 decode فیلدها قبل از Marshal — نه روی متن خام
+            // decode فیلدها قبل از Marshal — نه روی متن خام
             b, _ := json.Marshal(npvOpenDecodeSentinels(x))
             if u, err := extractURIsFromConfig(b); err == nil {
                 *uris = append(*uris, u...)
@@ -1400,16 +1430,16 @@ type streamSettingsT struct {
 }
 
 type vnextUserT struct {
-    Id         string `json:"id"`
-    Encryption string `json:"encryption"`
-    Flow       string `json:"flow"`
-    Security   string `json:"security"`
-    AlterId    int    `json:"alterId"`
+    Id         string  `json:"id"`
+    Encryption string  `json:"encryption"`
+    Flow       string  `json:"flow"`
+    Security   string  `json:"security"`
+    AlterId    FlexInt `json:"alterId"`
 }
 
 type vnextEntryT struct {
     Address string       `json:"address"`
-    Port    int          `json:"port"`
+    Port    FlexInt      `json:"port"`
     Users   []vnextUserT `json:"users"`
 }
 
@@ -1418,11 +1448,11 @@ type vnextSettingsT struct {
 }
 
 type serverEntryT struct {
-    Address  string `json:"address"`
-    Port     int    `json:"port"`
-    Password string `json:"password"`
-    Method   string `json:"method"`
-    Flow     string `json:"flow"`
+    Address  string  `json:"address"`
+    Port     FlexInt `json:"port"`
+    Password string  `json:"password"`
+    Method   string  `json:"method"`
+    Flow     string  `json:"flow"`
 }
 
 type serversSettingsT struct {
@@ -1436,7 +1466,7 @@ type napsternetProfile struct {
     ServerPort any             `json:"serverPort"`
     Password   string          `json:"password"`
     Method     string          `json:"method"`
-    V2rayJson  json.RawMessage `json:"v2rayJson"` // 🆕 رشته یا آبجکت هر دو
+    V2rayJson  json.RawMessage `json:"v2rayJson"` // رشته یا آبجکت هر دو
 }
 
 func getPortString(p any) string {
@@ -1482,6 +1512,16 @@ func formatQuery(q url.Values) string {
     return s
 }
 
+// 🆕 npvHostFromHeaders — Host از headers بدون حساسیت به بزرگی/کوچکی حروف
+func npvHostFromHeaders(h map[string]string) string {
+    for k, v := range h {
+        if strings.EqualFold(k, "Host") && strings.TrimSpace(v) != "" {
+            return v
+        }
+    }
+    return ""
+}
+
 func buildStreamQuery(ss *streamSettingsT) url.Values {
     q := url.Values{}
     network := ss.Network
@@ -1504,7 +1544,7 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             }
             if ss.WSSettings.Host != "" {
                 q.Set("host", ss.WSSettings.Host)
-            } else if h, ok := ss.WSSettings.Headers["Host"]; ok && h != "" {
+            } else if h := npvHostFromHeaders(ss.WSSettings.Headers); h != "" {
                 q.Set("host", h)
             }
         }
@@ -1569,153 +1609,186 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
             if ss.RealitySettings.ServerName != "" {
                 q.Set("sni", ss.RealitySettings.ServerName)
             }
+            if ss.RealitySettings.Fingerprint != "" {
+                q.Set("fp", ss.RealitySettings.Fingerprint)
+            }
             if ss.RealitySettings.PublicKey != "" {
                 q.Set("pbk", ss.RealitySettings.PublicKey)
             }
             if ss.RealitySettings.ShortId != "" {
                 q.Set("sid", ss.RealitySettings.ShortId)
             }
+            if ss.RealitySettings.SpiderX != "" {
+                q.Set("spx", ss.RealitySettings.SpiderX) // 🆕
+            }
         }
     }
     return q
 }
 
-func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, error) {
-    if len(vs.Vnext) == 0 || len(vs.Vnext[0].Users) == 0 {
-        return "", fmt.Errorf("vless: missing user")
+// 🆕 vlessURI — همه کاربران/سرورها
+func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
+    if len(vs.Vnext) == 0 {
+        return nil, fmt.Errorf("vless: missing user")
     }
-    v := vs.Vnext[0]
-    u := v.Users[0]
-
-    q := buildStreamQuery(ss)
-    enc := u.Encryption
-    if enc == "" {
-        enc = "none"
-    }
-    q.Set("encryption", enc)
-    if u.Flow != "" {
-        q.Set("flow", u.Flow)
-    }
-
-    return fmt.Sprintf("vless://%s@%s:%d?%s#%s",
-        u.Id, formatHost(v.Address), v.Port, formatQuery(q), cleanRemarks(remarks)), nil
-}
-
-func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) (string, error) {
-    if len(vs.Vnext) == 0 || len(vs.Vnext[0].Users) == 0 {
-        return "", fmt.Errorf("vmess: missing user")
-    }
-    v := vs.Vnext[0]
-    u := v.Users[0]
-
-    network := ss.Network
-    if network == "" {
-        network = "tcp"
-    }
-
-    tlsFlag := ""
-    if ss.Security == "tls" || ss.Security == "reality" {
-        tlsFlag = "tls"
-    }
-
-    host, path := "", ""
-    switch network {
-    case "ws":
-        if ss.WSSettings != nil {
-            path = ss.WSSettings.Path
-            if ss.WSSettings.Host != "" {
-                host = ss.WSSettings.Host
+    var uris []string
+    for _, v := range vs.Vnext {
+        for _, u := range v.Users {
+            q := buildStreamQuery(ss)
+            enc := u.Encryption
+            if enc == "" {
+                enc = "none"
             }
-        }
-    case "grpc":
-        if ss.GRPCSettings != nil {
-            path = ss.GRPCSettings.ServiceName
-        }
-    case "httpupgrade":
-        if ss.HTTPUpgradeSettings != nil {
-            path = ss.HTTPUpgradeSettings.Path
-            host = ss.HTTPUpgradeSettings.Host
+            q.Set("encryption", enc)
+            if u.Flow != "" {
+                q.Set("flow", u.Flow)
+            }
+            uris = append(uris, fmt.Sprintf("vless://%s@%s:%d?%s#%s",
+                u.Id, formatHost(v.Address), v.Port, formatQuery(q), cleanRemarks(remarks)))
         }
     }
-
-    sni := ""
-    if ss.TLSSettings != nil {
-        sni = ss.TLSSettings.ServerName
+    if len(uris) == 0 {
+        return nil, fmt.Errorf("vless: missing user")
     }
-
-    scy := u.Security
-    if scy == "" {
-        scy = "auto"
-    }
-
-    obj := map[string]string{
-        "v": "2", "ps": cleanRemarks(remarks), "add": v.Address, "port": fmt.Sprintf("%d", v.Port),
-        "id": u.Id, "aid": "0", "scy": scy, "net": network, "type": "none",
-        "host": host, "path": path, "tls": tlsFlag, "sni": sni,
-    }
-    b, err := json.Marshal(obj)
-    if err != nil {
-        return "", err
-    }
-    return "vmess://" + base64.StdEncoding.EncodeToString(b), nil
+    return uris, nil
 }
 
-func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) (string, error) {
+// 🆕 vmessURI — همه کاربران + aid واقعی از AlterId
+func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
+    if len(vs.Vnext) == 0 {
+        return nil, fmt.Errorf("vmess: missing user")
+    }
+    var uris []string
+    for _, v := range vs.Vnext {
+        for _, u := range v.Users {
+            network := ss.Network
+            if network == "" {
+                network = "tcp"
+            }
+
+            tlsFlag := ""
+            if ss.Security == "tls" || ss.Security == "reality" {
+                tlsFlag = "tls"
+            }
+
+            host, path := "", ""
+            switch network {
+            case "ws":
+                if ss.WSSettings != nil {
+                    path = ss.WSSettings.Path
+                    if ss.WSSettings.Host != "" {
+                        host = ss.WSSettings.Host
+                    } else {
+                        host = npvHostFromHeaders(ss.WSSettings.Headers)
+                    }
+                }
+            case "grpc":
+                if ss.GRPCSettings != nil {
+                    path = ss.GRPCSettings.ServiceName
+                }
+            case "httpupgrade":
+                if ss.HTTPUpgradeSettings != nil {
+                    path = ss.HTTPUpgradeSettings.Path
+                    host = ss.HTTPUpgradeSettings.Host
+                }
+            }
+
+            sni := ""
+            if ss.TLSSettings != nil {
+                sni = ss.TLSSettings.ServerName
+            }
+
+            scy := u.Security
+            if scy == "" {
+                scy = "auto"
+            }
+
+            obj := map[string]string{
+                "v": "2", "ps": cleanRemarks(remarks), "add": v.Address, "port": fmt.Sprintf("%d", v.Port),
+                "id": u.Id, "aid": strconv.Itoa(int(u.AlterId)), "scy": scy, "net": network, "type": "none",
+                "host": host, "path": path, "tls": tlsFlag, "sni": sni,
+            }
+            b, err := json.Marshal(obj)
+            if err != nil {
+                continue
+            }
+            uris = append(uris, "vmess://"+base64.StdEncoding.EncodeToString(b))
+        }
+    }
+    if len(uris) == 0 {
+        return nil, fmt.Errorf("vmess: missing user")
+    }
+    return uris, nil
+}
+
+// 🆕 trojanURI — همه سرورها
+func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
     if len(ts.Servers) == 0 {
-        return "", fmt.Errorf("trojan: missing server")
+        return nil, fmt.Errorf("trojan: missing server")
     }
-    s := ts.Servers[0]
-    q := buildStreamQuery(ss)
-    if s.Flow != "" {
-        q.Set("flow", s.Flow)
+    var uris []string
+    for _, s := range ts.Servers {
+        q := buildStreamQuery(ss)
+        if s.Flow != "" {
+            q.Set("flow", s.Flow)
+        }
+        uris = append(uris, fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
+            escapeUserInfo(s.Password), formatHost(s.Address), s.Port, formatQuery(q), cleanRemarks(remarks)))
     }
-    return fmt.Sprintf("trojan://%s@%s:%d?%s#%s",
-        escapeUserInfo(s.Password), formatHost(s.Address), s.Port, formatQuery(q), cleanRemarks(remarks)), nil
+    return uris, nil
 }
 
-func shadowsocksURI(ts serversSettingsT, remarks string) (string, error) {
+// 🆕 shadowsocksURI — همه سرورها
+func shadowsocksURI(ts serversSettingsT, remarks string) ([]string, error) {
     if len(ts.Servers) == 0 {
-        return "", fmt.Errorf("ss: missing server")
+        return nil, fmt.Errorf("ss: missing server")
     }
-    s := ts.Servers[0]
-    userInfo := base64.RawURLEncoding.EncodeToString([]byte(s.Method + ":" + s.Password))
-    return fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, formatHost(s.Address), s.Port, cleanRemarks(remarks)), nil
+    var uris []string
+    for _, s := range ts.Servers {
+        userInfo := base64.RawURLEncoding.EncodeToString([]byte(s.Method + ":" + s.Password))
+        uris = append(uris, fmt.Sprintf("ss://%s@%s:%d#%s", userInfo, formatHost(s.Address), s.Port, cleanRemarks(remarks)))
+    }
+    return uris, nil
 }
 
+// outboundToURI — همه لینک‌ها با \n برگردانده می‌شوند
 func outboundToURI(protocol string, settingsRaw, streamRaw json.RawMessage, remarks string) (string, error) {
     var ss streamSettingsT
     if len(streamRaw) > 0 {
         _ = json.Unmarshal(streamRaw, &ss)
     }
 
+    var uris []string
+    var err error
     switch strings.ToLower(protocol) {
     case "vless":
         var vs vnextSettingsT
-        if err := json.Unmarshal(settingsRaw, &vs); err != nil {
+        if err = json.Unmarshal(settingsRaw, &vs); err != nil {
             return "", err
         }
-        return vlessURI(vs, &ss, remarks)
+        uris, err = vlessURI(vs, &ss, remarks)
     case "vmess":
         var vs vnextSettingsT
-        if err := json.Unmarshal(settingsRaw, &vs); err != nil {
+        if err = json.Unmarshal(settingsRaw, &vs); err != nil {
             return "", err
         }
-        return vmessURI(vs, &ss, remarks)
+        uris, err = vmessURI(vs, &ss, remarks)
     case "trojan":
         var ts serversSettingsT
-        if err := json.Unmarshal(settingsRaw, &ts); err != nil {
+        if err = json.Unmarshal(settingsRaw, &ts); err != nil {
             return "", err
         }
-        return trojanURI(ts, &ss, remarks)
+        uris, err = trojanURI(ts, &ss, remarks)
     case "shadowsocks":
         var ts serversSettingsT
-        if err := json.Unmarshal(settingsRaw, &ts); err != nil {
+        if err = json.Unmarshal(settingsRaw, &ts); err != nil {
             return "", err
         }
-        return shadowsocksURI(ts, remarks)
+        uris, err = shadowsocksURI(ts, remarks)
     default:
         return "", fmt.Errorf("unsupported: %s", protocol)
     }
+    return strings.Join(uris, "\n"), err
 }
 
 func extractURIsFromConfig(pt []byte) ([]string, error) {
@@ -1748,10 +1821,14 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
             remarks = hdr.Tag
         }
         uri, err := outboundToURI(hdr.Protocol, hdr.Settings, hdr.StreamSettings, remarks)
-        if err != nil {
+        if err != nil || uri == "" {
             continue
         }
-        uris = append(uris, uri)
+        for _, u := range strings.Split(uri, "\n") {
+            if u = strings.TrimSpace(u); u != "" {
+                uris = append(uris, u)
+            }
+        }
     }
     return uris, nil
 }
