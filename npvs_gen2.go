@@ -7,7 +7,6 @@ import (
     "encoding/json"
     "fmt"
     "io"
-    "log"
     "net/url"
     "sort"
     "strconv"
@@ -37,6 +36,11 @@ const (
     npvGen2AppKeyBlockSize   = 78
     npvGen2KeySize           = 32
     npvGen2SigSize           = 64
+
+    npvGen2TypeVMess       = 1
+    npvGen2TypeShadowsocks = 3
+    npvGen2TypeVLESS       = 5
+    npvGen2TypeTrojan      = 6
 
     npvOpenMarker   = "NPVO1"
     npvSubMarker    = "NPVTSUB1"
@@ -431,7 +435,7 @@ func npvGen2Frag(rem string) string {
     return "#" + url.PathEscape(rem)
 }
 
-// ─── پارسر مستقیم v2rayJson — tolerant (پورت رشته‌ای/عددی هر دو) ───
+// ─── 🆕 پارسر مستقیم v2rayJson — با پشتیبانی sentinel ───
 
 func npvGen2V2RayJSONLinks(raw any) []string {
     var root map[string]any
@@ -440,11 +444,13 @@ func npvGen2V2RayJSONLinks(raw any) []string {
         if strings.TrimSpace(v) == "" {
             return nil
         }
+        // 🆕 decode sentinel (belt-and-suspenders برای مسیرهای مشترک)
+        v = npvDecodeSentinelsStr(v)
         if err := json.Unmarshal([]byte(cleanEmbeddedJSON(v)), &root); err != nil {
             return nil
         }
     case map[string]any:
-        root = v
+        root = npvOpenDecodeSentinels(v)
     default:
         return nil
     }
@@ -475,6 +481,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
     stream := npvGen2GetMap(ob["streamSettings"])
 
     host, port, password, uuid, flow, method := "", 0, "", "", "", ""
+    alterID := 0
     switch proto {
     case "trojan", "shadowsocks":
         servers := npvGen2GetArr(settings["servers"])
@@ -505,6 +512,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         password = uuid
         flow = npvGen2GetStr(u, "flow")
         method = npvGen2Or(npvGen2GetStr(u, "security"), "auto")
+        alterID = npvGen2GetInt(u, "alterId") // 🆕 aid واقعی
     }
     if host == "" || port == 0 || password == "" {
         return ""
@@ -536,7 +544,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         h := npvGen2GetStr(ws, "host")
         if h == "" {
             if hd := npvGen2GetMap(ws["headers"]); hd != nil {
-                h = npvGen2Or(npvGen2GetStr(hd, "Host"), npvGen2GetStr(hd, "host"))
+                h = npvHostFromHeaders(hd)
             }
         }
         if h == "" {
@@ -571,11 +579,15 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         npvGen2Set(q, "fp", npvGen2GetStr(reality, "fingerprint"))
         npvGen2Set(q, "pbk", npvGen2GetStr(reality, "publicKey"))
         npvGen2Set(q, "sid", npvGen2GetStr(reality, "shortId"))
+        npvGen2Set(q, "spx", npvGen2GetStr(reality, "spiderX"))
     }
 
     rem := cleanRemarks(remarks)
     switch proto {
     case "trojan":
+        if flow != "" {
+            q.Set("flow", flow)
+        }
         return fmt.Sprintf("trojan://%s@%s:%d?%s%s",
             url.PathEscape(password), host, port, q.Encode(), npvGen2Frag(rem))
     case "vless":
@@ -610,9 +622,9 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         }
         obj := map[string]string{
             "v": "2", "ps": rem, "add": host, "port": strconv.Itoa(port),
-            "id": uuid, "aid": "0", "scy": npvGen2Or(method, "auto"),
-            "net": network, "type": "none", "host": netHost, "path": netPath,
-            "tls": tlsFlag, "sni": sni,
+            "id": uuid, "aid": strconv.Itoa(alterID), // 🆕 aid واقعی
+            "scy": npvGen2Or(method, "auto"), "net": network, "type": "none",
+            "host": netHost, "path": netPath, "tls": tlsFlag, "sni": sni,
         }
         b, err := json.Marshal(obj)
         if err != nil {
@@ -702,13 +714,13 @@ func npvGen2V2RayLink(remarks, address string, p map[string]string) string {
         port = npvGen2Int(p["port"])
     }
     switch npvGen2Int(p["configType"]) {
-    case 1:
+    case npvGen2TypeVMess:
         return npvGen2VMessLink(host, port, remarks, p)
-    case 5:
+    case npvGen2TypeVLESS:
         return npvGen2VLESSLink(host, port, remarks, p)
-    case 6:
+    case npvGen2TypeTrojan:
         return npvGen2TrojanLink(host, port, remarks, p)
-    case 3:
+    case npvGen2TypeShadowsocks:
         return npvGen2ShadowsocksLink(host, port, remarks, p)
     }
     return npvGen2KeyValues(p)
