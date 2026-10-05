@@ -22,7 +22,7 @@ import (
     tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 )
 
-const botVersion = "8.2-FULL"
+const botVersion = "8.3-FINAL"
 
 const (
     msgLimit    = 3900
@@ -883,6 +883,8 @@ func consumeJSONBlob(pt []byte, res *processResult) {
             }
         }
         if foundAny {
+            // 🆕 dedupe در مسیر JSON خام (ضد لینک تکراری)
+            res.URIs = dedupe(res.URIs)
             return
         }
     }
@@ -1260,13 +1262,11 @@ func (f *FlexInt) UnmarshalJSON(data []byte) error {
         *f = 0
         return nil
     }
-    // عدد مستقیم
     var n int
     if err := json.Unmarshal(data, &n); err == nil {
         *f = FlexInt(n)
         return nil
     }
-    // رشته
     var str string
     if err := json.Unmarshal(data, &str); err == nil {
         if n, err := strconv.Atoi(strings.TrimSpace(str)); err == nil {
@@ -1274,8 +1274,7 @@ func (f *FlexInt) UnmarshalJSON(data []byte) error {
             return nil
         }
     }
-    // هر چیز دیگر → صفر (soft-fail تا کل outbound رد نشود)
-    *f = 0
+    *f = 0 // soft-fail
     return nil
 }
 
@@ -1417,6 +1416,11 @@ type httpUpgradeSettingsT struct {
     Host string `json:"host"`
 }
 
+type httpSettingsT struct {
+    Path string `json:"path"`
+    Host string `json:"host"`
+}
+
 type streamSettingsT struct {
     Network             string                `json:"network"`
     Security            string                `json:"security"`
@@ -1427,6 +1431,7 @@ type streamSettingsT struct {
     KCPSettings         *kcpSettingsT         `json:"kcpSettings"`
     QUICSettings        *quicSettingsT        `json:"quicSettings"`
     HTTPUpgradeSettings *httpUpgradeSettingsT `json:"httpupgradeSettings"`
+    HTTPSettings        *httpSettingsT        `json:"httpSettings"` // 🆕 برای http/h2
 }
 
 type vnextUserT struct {
@@ -1512,7 +1517,7 @@ func formatQuery(q url.Values) string {
     return s
 }
 
-// 🆕 npvHostFromHeaders — Host از headers بدون حساسیت به بزرگی/کوچکی حروف
+// 🆕 npvHostFromHeaders — Host از headers (map[string]string) بدون حساسیت حروف
 func npvHostFromHeaders(h map[string]string) string {
     for k, v := range h {
         if strings.EqualFold(k, "Host") && strings.TrimSpace(v) != "" {
@@ -1586,6 +1591,15 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
                 q.Set("host", ss.HTTPUpgradeSettings.Host)
             }
         }
+    case "http", "h2", "xhttp": // 🆕 پشتیبانی http/h2/xhttp
+        if ss.HTTPSettings != nil {
+            if ss.HTTPSettings.Host != "" {
+                q.Set("host", ss.HTTPSettings.Host)
+            }
+            if ss.HTTPSettings.Path != "" {
+                q.Set("path", ss.HTTPSettings.Path)
+            }
+        }
     }
 
     switch security {
@@ -1619,7 +1633,7 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
                 q.Set("sid", ss.RealitySettings.ShortId)
             }
             if ss.RealitySettings.SpiderX != "" {
-                q.Set("spx", ss.RealitySettings.SpiderX) // 🆕
+                q.Set("spx", ss.RealitySettings.SpiderX)
             }
         }
     }
@@ -1691,6 +1705,11 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string,
                     path = ss.HTTPUpgradeSettings.Path
                     host = ss.HTTPUpgradeSettings.Host
                 }
+            case "http", "h2", "xhttp":
+                if ss.HTTPSettings != nil {
+                    host = ss.HTTPSettings.Host
+                    path = ss.HTTPSettings.Path
+                }
             }
 
             sni := ""
@@ -1712,7 +1731,7 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string,
             if err != nil {
                 continue
             }
-            uris = append(uris, "vmess://"+base64.StdEncoding.EncodeToString(b))
+            uris = append(uris, "vmess://" + base64.StdEncoding.EncodeToString(b))
         }
     }
     if len(uris) == 0 {
