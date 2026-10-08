@@ -583,7 +583,9 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         method = npvGen2Or(npvGen2GetStr(u, "security"), "auto")
         alterID = npvGen2GetInt(u, "alterId")
     }
-    if host == "" || password == "" || !npvValidEndpoint(host, port) {
+    // 🔧 اعتبارسنجی inline (بدون وابستگی به main.go)
+    if host == "" || port < 1 || port > 65535 || password == "" ||
+        strings.ContainsAny(strings.TrimSpace(host), " \t\r\n") {
         return ""
     }
     if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
