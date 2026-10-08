@@ -448,6 +448,58 @@ func npvHostFromHeadersAny(h map[string]any) string {
     return ""
 }
 
+// 🆕 npvGen2FixExtraJSON — بازگرداندن تایپ bool/number در extra xhttp
+// (اپ مقادیر را به‌صورت رشته ذخیره می‌کند؛ Xray سخت‌گیر است)
+func npvGen2FixExtraJSON(s string) string {
+    s = strings.TrimSpace(s)
+    if s == "" || s == "{}" {
+        return s
+    }
+    var m map[string]any
+    if err := json.Unmarshal([]byte(s), &m); err != nil {
+        return s // JSON نیست — دست نمی‌زنیم
+    }
+    npvGen2CoerceExtra(m)
+    b, err := json.Marshal(m)
+    if err != nil {
+        return s
+    }
+    return string(b)
+}
+
+func npvGen2CoerceExtra(m map[string]any) {
+    boolKeys := map[string]bool{"xPaddingObfsMode": true}
+    intKeys := map[string]bool{
+        "cMaxReuseTimes": true, "hKeepAlivePeriod": true,
+        "maxConnections": true, "cMaxLifetimeMs": true,
+    }
+    for k, v := range m {
+        switch val := v.(type) {
+        case string:
+            t := strings.TrimSpace(val)
+            if boolKeys[k] {
+                if strings.EqualFold(t, "true") {
+                    m[k] = true
+                } else if strings.EqualFold(t, "false") {
+                    m[k] = false
+                }
+            } else if intKeys[k] {
+                if n, err := strconv.Atoi(t); err == nil {
+                    m[k] = n
+                }
+            }
+        case map[string]any:
+            npvGen2CoerceExtra(val) // xmux و آبجکت‌های تو در تو
+        case []any:
+            for _, item := range val {
+                if sub, ok := item.(map[string]any); ok {
+                    npvGen2CoerceExtra(sub)
+                }
+            }
+        }
+    }
+}
+
 // ─── 🆕 پارسر مستقیم v2rayJson — با پشتیبانی sentinel ───
 
 func npvGen2V2RayJSONLinks(raw any) []string {
@@ -457,13 +509,13 @@ func npvGen2V2RayJSONLinks(raw any) []string {
         if strings.TrimSpace(v) == "" {
             return nil
         }
-        // 🆕 decode sentinel (belt-and-suspenders برای مسیرهای مشترک)
+        // decode sentinel (belt-and-suspenders برای مسیرهای مشترک)
         v = npvDecodeSentinelsStr(v)
         if err := json.Unmarshal([]byte(cleanEmbeddedJSON(v)), &root); err != nil {
             return nil
         }
     case map[string]any:
-        dec, ok := npvOpenDecodeSentinels(v).(map[string]any) // 🔧 type assertion
+        dec, ok := npvOpenDecodeSentinels(v).(map[string]any)
         if !ok {
             return nil
         }
@@ -529,9 +581,9 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         password = uuid
         flow = npvGen2GetStr(u, "flow")
         method = npvGen2Or(npvGen2GetStr(u, "security"), "auto")
-        alterID = npvGen2GetInt(u, "alterId") // 🆕 aid واقعی
+        alterID = npvGen2GetInt(u, "alterId")
     }
-    if host == "" || port == 0 || password == "" {
+    if host == "" || password == "" || !npvValidEndpoint(host, port) {
         return ""
     }
     if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
@@ -561,7 +613,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         h := npvGen2GetStr(ws, "host")
         if h == "" {
             if hd := npvGen2GetMap(ws["headers"]); hd != nil {
-                h = npvHostFromHeadersAny(hd) // 🔧 تابع سازگار با map[string]any
+                h = npvHostFromHeadersAny(hd)
             }
         }
         if h == "" {
@@ -573,8 +625,24 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         npvGen2Set(q, "serviceName", npvGen2GetStr(grpc, "serviceName"))
         npvGen2Set(q, "mode", npvGen2Or(npvGen2GetStr(grpc, "mode"), "gun"))
     case "httpupgrade", "xhttp":
-        npvGen2Set(q, "path", npvGen2GetStr(npvGen2GetMap(stream[network+"Settings"]), "path"))
-        npvGen2Set(q, "host", npvGen2GetStr(npvGen2GetMap(stream[network+"Settings"]), "host"))
+        xh := npvGen2GetMap(stream[network+"Settings"])
+        npvGen2Set(q, "path", npvGen2GetStr(xh, "path"))
+        npvGen2Set(q, "host", npvGen2GetStr(xh, "host"))
+        if network == "xhttp" {
+            npvGen2Set(q, "mode", npvGen2GetStr(xh, "mode"))
+            if xh != nil {
+                switch ev := xh["extra"].(type) {
+                case string:
+                    if strings.TrimSpace(ev) != "" {
+                        q.Set("extra", npvGen2FixExtraJSON(ev))
+                    }
+                case map[string]any:
+                    if b, err := json.Marshal(ev); err == nil && len(b) > 2 {
+                        q.Set("extra", npvGen2FixExtraJSON(string(b)))
+                    }
+                }
+            }
+        }
     }
 
     switch security {
@@ -639,7 +707,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         }
         obj := map[string]string{
             "v": "2", "ps": rem, "add": host, "port": strconv.Itoa(port),
-            "id": uuid, "aid": strconv.Itoa(alterID), // 🆕 aid واقعی
+            "id": uuid, "aid": strconv.Itoa(alterID),
             "scy": npvGen2Or(method, "auto"), "net": network, "type": "none",
             "host": netHost, "path": netPath, "tls": tlsFlag, "sni": sni,
         }
@@ -842,7 +910,9 @@ func npvGen2StreamQuery(p map[string]string) url.Values {
         npvGen2Set(q, "path", p["path"])
         npvGen2Set(q, "host", p["host"])
         npvGen2Set(q, "mode", npvGen2Or(p["xhttpMode"], p["mode"]))
-        npvGen2Set(q, "extra", p["xhttpExtra"])
+        if network == "xhttp" && strings.TrimSpace(p["xhttpExtra"]) != "" {
+            q.Set("extra", npvGen2FixExtraJSON(p["xhttpExtra"]))
+        }
     case "tcp", "raw":
         if headerType := p["headerType"]; headerType != "" && headerType != "none" {
             q.Set("headerType", headerType)
