@@ -883,7 +883,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
             }
         }
         if foundAny {
-            // 🆕 dedupe در مسیر JSON خام (ضد لینک تکراری)
+            // dedupe در مسیر JSON خام (ضد لینک تکراری)
             res.URIs = dedupe(res.URIs)
             return
         }
@@ -1314,7 +1314,7 @@ func cleanEmbeddedJSON(c string) []byte {
     return []byte(c3)
 }
 
-// 🆕 walkJSON — sentinel-aware: هر شاخه قبل از Marshal/parse فیلدهایش decode می‌شود
+// 🆕 walkJSON — sentinel-aware + دیباگ v2rayJson string parse
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
@@ -1322,8 +1322,18 @@ func walkJSON(v any, uris *[]string) {
             switch c := raw.(type) {
             case string:
                 if c != "" {
-                    if u, err := extractURIsFromConfig(cleanEmbeddedJSON(npvDecodeSentinelsStr(c))); err == nil {
+                    decoded := npvDecodeSentinelsStr(c)
+                    clean := cleanEmbeddedJSON(decoded)
+                    if u, err := extractURIsFromConfig(clean); err == nil {
                         *uris = append(*uris, u...)
+                    } else {
+                        // 🆕 دیباگ: چرا پارس شکست خورد؟
+                        head := string(clean)
+                        if len(head) > 120 {
+                            head = head[:120]
+                        }
+                        head = strings.ReplaceAll(head, "\n", "⏎")
+                        log.Printf("[NPVT] v2rayJson string parse failed: %v | head=%s", err, head)
                     }
                 }
             case map[string]any:
@@ -1840,7 +1850,7 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
             remarks = hdr.Tag
         }
         uri, err := outboundToURI(hdr.Protocol, hdr.Settings, hdr.StreamSettings, remarks)
-        if err != nil || uri == "" {
+        if err != nil {
             continue
         }
         for _, u := range strings.Split(uri, "\n") {
@@ -1852,45 +1862,36 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
-// 🆕 extractFromV2rayProfile — v2rayJson رشته/آبجکت + sentinel + fallback اصلاح‌شده
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
     _ = json.Unmarshal(b, &p)
 
-    if len(p.V2rayJson) == 0 && p.Server == "" {
+    if p.Server == "" && p.V2rayJson == "" {
         var wrapper struct {
             V2rayProfile napsternetProfile `json:"v2rayProfile"`
         }
         _ = json.Unmarshal(b, &wrapper)
-        if len(wrapper.V2rayProfile.V2rayJson) > 0 || wrapper.V2rayProfile.Server != "" {
+        if wrapper.V2rayProfile.Server != "" || wrapper.V2rayProfile.V2rayJson != "" {
             p = wrapper.V2rayProfile
         }
     }
 
-    // 🥇 v2rayJson — رشته یا آبجکت (موتور مشترک با Gen2)
-    if len(p.V2rayJson) > 0 {
-        var vj any
-        if err := json.Unmarshal(p.V2rayJson, &vj); err == nil {
-            if uris := npvGen2V2RayJSONLinks(vj); len(uris) > 0 {
-                return uris, nil
-            }
+    if p.V2rayJson != "" {
+        if u, err := extractURIsFromConfig(cleanEmbeddedJSON(p.V2rayJson)); err == nil && len(u) > 0 {
+            return u, nil
         }
     }
 
-    // fallback: فیلدهای سطح بالا — با decode sentinel
     var uris []string
-    server := npvDecodeSentinelsStr(p.Server)
-    password := npvDecodeSentinelsStr(p.Password)
-    method := npvDecodeSentinelsStr(p.Method)
-    remarks := cleanRemarks(npvDecodeSentinelsStr(p.Remarks))
+    remarks := cleanRemarks(p.Remarks)
     portStr := getPortString(p.ServerPort)
 
-    if server != "" {
-        if (p.ConfigType == 3 || (method != "" && !strings.EqualFold(method, "none"))) && password != "" {
-            userInfo := base64.RawURLEncoding.EncodeToString([]byte(method + ":" + password))
-            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(server), portStr, remarks))
-        } else if p.ConfigType == 4 || (password != "" && method == "") {
-            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(password), formatHost(server), portStr, remarks))
+    if p.Server != "" {
+        if (p.ConfigType == 3 || p.Method != "") && p.Password != "" {
+            userInfo := base64.RawURLEncoding.EncodeToString([]byte(p.Method + ":" + p.Password))
+            uris = append(uris, fmt.Sprintf("ss://%s@%s:%s#%s", userInfo, formatHost(p.Server), portStr, remarks))
+        } else if p.ConfigType == 4 || (p.Password != "" && p.Method == "") {
+            uris = append(uris, fmt.Sprintf("trojan://%s@%s:%s#%s", escapeUserInfo(p.Password), formatHost(p.Server), portStr, remarks))
         }
     }
 
