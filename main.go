@@ -1862,22 +1862,23 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
+// 🔧 extractFromV2rayProfile — fیکس json.RawMessage (بدون مقایسه با رشته)
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
     _ = json.Unmarshal(b, &p)
 
-    if p.Server == "" && p.V2rayJson == "" {
+    if len(p.V2rayJson) == 0 && p.Server == "" {
         var wrapper struct {
             V2rayProfile napsternetProfile `json:"v2rayProfile"`
         }
         _ = json.Unmarshal(b, &wrapper)
-        if wrapper.V2rayProfile.Server != "" || wrapper.V2rayProfile.V2rayJson != "" {
+        if len(wrapper.V2rayProfile.V2rayJson) > 0 || wrapper.V2rayProfile.Server != "" {
             p = wrapper.V2rayProfile
         }
     }
 
-    if p.V2rayJson != "" {
-        if u, err := extractURIsFromConfig(cleanEmbeddedJSON(p.V2rayJson)); err == nil && len(u) > 0 {
+    if len(p.V2rayJson) > 0 {
+        if u, err := extractURIsFromConfig(cleanEmbeddedJSON(string(p.V2rayJson))); err == nil && len(u) > 0 {
             return u, nil
         }
     }
