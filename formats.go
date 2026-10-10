@@ -2,7 +2,12 @@ package main
 
 import (
     "bytes"
+    "crypto/aes"
+    "crypto/cipher"
+    "crypto/rsa"
+    "crypto/sha1"
     "crypto/sha256"
+    "crypto/x509"
     "encoding/base64"
     "encoding/binary"
     "encoding/hex"
@@ -10,7 +15,6 @@ import (
     "errors"
     "fmt"
     "io"
-    "log"
     "net/url"
     "regexp"
     "strings"
@@ -41,26 +45,8 @@ func cleanInvisible(s string) string {
     return invisibleRe.ReplaceAllString(s, "")
 }
 
-// 🆕 debugHeadNPVT — هلپر دیباگ (مشترک با main.go)
-func debugHeadNPVT(s string, n int) string {
-    s = strings.TrimSpace(s)
-    if len(s) > n {
-        s = s[:n]
-    }
-    s = strings.ReplaceAll(s, "\n", "⏎")
-    s = strings.ReplaceAll(s, "\r", "")
-    return s
-}
-
-// 🆕 نسخه جدید: NPVS رو هم هندل می‌کنه + لاگ مسیریابی
+// ✅ نسخه جدید: NPVS رو هم هندل می‌کنه
 func processRouted(data []byte, ext string, chatID int64) (*processResult, error, bool) {
-    // 🆕 دیباگ مسیریابی — ببینیم فایل واقعاً چیست
-    if len(data) > 16 {
-        head := data[:16]
-        log.Printf("[ROUTE] ext=%q size=%d head=%x | text_head=%q",
-            ext, len(data), head, debugHeadNPVT(string(data), 60))
-    }
-
     switch ext {
     case ".slip":
         return processSlipnet(data, chatID)
@@ -87,7 +73,6 @@ func processRouted(data []byte, ext string, chatID int64) (*processResult, error
 
     // تشخیص NPVS در متن (هر جای متن)
     if strings.Contains(text, "NPVS") {
-        log.Printf("[ROUTE] NPVS detected in text (ext=%q)", ext)
         return handleNPVS(data, chatID)
     }
 
@@ -151,7 +136,7 @@ func sendBundleResult(chatID int64, res *processResult) {
 // ─────────────── ابزارهای مشترک ───────────────
 
 func decryptAESECBShared(ciphertext, key []byte) ([]byte, error) {
-    block, err := aesNewCipher(key)
+    block, err := aes.NewCipher(key)
     if err != nil {
         return nil, err
     }
@@ -165,22 +150,6 @@ func decryptAESECBShared(ciphertext, key []byte) ([]byte, error) {
     }
     return plaintext, nil
 }
-
-func aesNewCipher(key []byte) (cipherBlock, error) {
-    return newAESBlock(key)
-}
-
-// بسته‌بندی crypto/aes — برای جلوگیری از import مستقیم در این فایل
-type cipherBlock interface {
-    BlockSize() int
-    Decrypt(dst, src []byte)
-}
-
-func newAESBlock(key []byte) (cipherBlock, error) {
-    return aesNewCipherReal(key)
-}
-
-// ─────────────── PKCS7 و ابزار ───────────────
 
 func pkcs7UnpadSoft(data []byte, blockSize int) ([]byte, error) {
     if len(data) == 0 || len(data)%blockSize != 0 {
@@ -404,14 +373,12 @@ func slipExtractVless(plaintext string) string {
         uuid, formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
-var slipAEAD = func() cipherAEAD {
+var slipAEAD = func() cipher.AEAD {
     key, _ := hex.DecodeString(slipKeyHex)
-    return newAESGCM(key)
+    block, _ := aes.NewCipher(key)
+    aead, _ := cipher.NewGCM(block)
+    return aead
 }()
-
-type cipherAEAD interface {
-    Open(dst, nonce, ciphertext, additionalData []byte) ([]byte, error)
-}
 
 func slipDecryptBlob(blobStr string) (string, error) {
     data, ok := decodeB64Loose(strings.Join(strings.Fields(blobStr), ""))
@@ -440,8 +407,12 @@ func slipDecryptBundle(data []byte, password string) (string, error) {
     iv := data[1+slipSaltLen : 1+slipSaltLen+slipIVLen]
     ct := data[1+slipSaltLen+slipIVLen:]
 
-    derivedKey := pbkdf2.Key([]byte(password), salt, slipPBKDF2Iters, slipKeySize, sha256New)
-    aesgcm, err := newAESGCM(derivedKey)
+    derivedKey := pbkdf2.Key([]byte(password), salt, slipPBKDF2Iters, slipKeySize, sha256.New)
+    block, err := aes.NewCipher(derivedKey)
+    if err != nil {
+        return "", err
+    }
+    aesgcm, err := cipher.NewGCM(block)
     if err != nil {
         return "", err
     }
@@ -454,7 +425,7 @@ func slipDecryptBundle(data []byte, password string) (string, error) {
 
 func processSlipnet(data []byte, chatID int64) (*processResult, error, bool) {
     text := strings.TrimSpace(string(data))
-    for _, p := range []string{"slipnet-bundle-enc://", "slipnet-enc://", "slipnet://"} {
+    for _, p := range []string{"slipnet-enc://", "slipnet://", "slipnet-bundle-enc://"} {
         if strings.HasPrefix(text, p) {
             text = strings.TrimPrefix(text, p)
         }
@@ -542,7 +513,7 @@ func processHatContent(data []byte) (*processResult, error) {
     if !ok {
         return nil, fmt.Errorf("base64 نامعتبر")
     }
-    hasher := sha256New()
+    hasher := sha1.New()
     hasher.Write([]byte(hatImportKey))
     derivedKey := hasher.Sum(nil)[:16]
 
@@ -550,7 +521,7 @@ func processHatContent(data []byte) (*processResult, error) {
     if err != nil {
         return nil, err
     }
-    unpadded, err := pkcs7UnpadSoft(plaintext, aesBlockSize)
+    unpadded, err := pkcs7UnpadSoft(plaintext, aes.BlockSize)
     if err != nil {
         return nil, err
     }
@@ -563,10 +534,13 @@ func processHatContent(data []byte) (*processResult, error) {
 
 var happPKCS1KeysB64 = []string{
     "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",
+    "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",
 }
 
 type happEngine struct {
-    privateKeys map[string]*rsaPrivateKey
+    privateKeys map[string]*rsa.PrivateKey
     linkRegex   *regexp.Regexp
 }
 
@@ -578,7 +552,7 @@ var (
 
 func getHappEngine() (*happEngine, error) {
     happEngineOnce.Do(func() {
-        p := &happEngine{privateKeys: make(map[string]*rsaPrivateKey)}
+        p := &happEngine{privateKeys: make(map[string]*rsa.PrivateKey)}
         p.linkRegex = regexp.MustCompile(`^(?:happ://)?([^/]+)/(.+)$`)
         versionMap := []string{"crypt", "crypt2", "crypt3", "crypt4"}
         for idx, b64RawKey := range happPKCS1KeysB64 {
@@ -590,10 +564,19 @@ func getHappEngine() (*happEngine, error) {
                 happInitErr = fmt.Errorf("decode key %d: %w", idx, err)
                 return
             }
-            priv, err := parseRSAPrivate(derBytes)
+            priv, err := x509.ParsePKCS1PrivateKey(derBytes)
             if err != nil {
-                happInitErr = fmt.Errorf("parse key %s: %w", versionMap[idx], err)
-                return
+                key, err2 := x509.ParsePKCS8PrivateKey(derBytes)
+                if err2 != nil {
+                    happInitErr = fmt.Errorf("parse key %s: %w", versionMap[idx], err2)
+                    return
+                }
+                rsaKey, ok := key.(*rsa.PrivateKey)
+                if !ok {
+                    happInitErr = fmt.Errorf("key %s is not RSA", versionMap[idx])
+                    return
+                }
+                priv = rsaKey
             }
             p.privateKeys[versionMap[idx]] = priv
         }
@@ -630,7 +613,7 @@ func (p *happEngine) decrypt(link string) (string, error) {
     return "", errors.New("رمزگشایی Happ با هیچ کلیدی موفق نشد")
 }
 
-func happDecryptChunks(encryptedB64 string, privateKey *rsaPrivateKey) (string, error) {
+func happDecryptChunks(encryptedB64 string, privateKey *rsa.PrivateKey) (string, error) {
     if encryptedB64 == "" {
         return "", errors.New("payload خالی است")
     }
@@ -638,14 +621,14 @@ func happDecryptChunks(encryptedB64 string, privateKey *rsaPrivateKey) (string, 
     if err != nil {
         return "", fmt.Errorf("base64: %w", err)
     }
-    keySize := rsaKeySize(privateKey)
+    keySize := (privateKey.N.BitLen() + 7) / 8
     if len(cipherBytes)%keySize != 0 {
         return "", errors.New("سایز داده با کلید هم‌خوانی ندارد")
     }
     var plaintext []byte
     for i := 0; i < len(cipherBytes); i += keySize {
         chunk := cipherBytes[i : i+keySize]
-        decryptedChunk, err := rsaDecryptPKCS1(privateKey, chunk)
+        decryptedChunk, err := rsa.DecryptPKCS1v15(nil, privateKey, chunk)
         if err != nil {
             return "", fmt.Errorf("rsa: %w", err)
         }
@@ -699,7 +682,7 @@ var (
     ehiStandardIVs = [][]byte{
         {0x2c, 0x5d, 0x11, 0x47, 0xbb, 0xad, 0x42, 0x2b, 0x3b, 0x33, 0x4d, 0x4d, 0x23, 0x5f, 0x1a, 0x53},
         {0x52, 0x2b, 0x01, 0x43, 0x3a, 0x5e, 0x8b, 0x2f, 0xc7, 0x54, 0x9e, 0x1a, 0xd3, 0x68, 0xe5, 0x41},
-        {0x33, 0x7a, 0x10, 0x35, 0xaa, 0xed, 0xf3, 0x45, 0x8c, 0xa1, 0x67, 0x63, 0x2b, 0x75, 0xd8, 0x39},
+        {0x33, 0x7a, 0x10, 0x35, 0xaa, 0xed, 0xf3, 0x45, 0x8c, 0xa1, 0x67, 0xe9, 0x2d, 0x74, 0xb8, 0x39},
     }
     ehiAllIVs    = append(append([][]byte{}, ehiSideIVs...), ehiStandardIVs...)
     ehiCustomEnc = base64.NewEncoding("RkLC2QaVMPYgGJW/A4f7qzDb9e+t6Hr0Zp8OlNyjuxKcTw1o5EIimhBn3UvdSFXs")
@@ -934,8 +917,8 @@ func ehiGenerateMasterKey(config map[string]interface{}) []byte {
             sb.WriteString(ehiPyStr(val))
         }
     }
-    sum := sha256Sum([]byte(sb.String()))
-    return sum
+    sum := sha256.Sum256([]byte(sb.String()))
+    return sum[:]
 }
 
 func ehiPkcs7UnpadStrict(data []byte, blockSize int) ([]byte, error) {
@@ -955,11 +938,17 @@ func ehiPkcs7UnpadStrict(data []byte, blockSize int) ([]byte, error) {
 }
 
 func ehiAesCbcDecrypt(ciphertext, key, iv []byte) ([]byte, error) {
-    plaintext, err := aesCBCDecrypt(ciphertext, key, iv)
+    block, err := aes.NewCipher(key)
     if err != nil {
         return nil, err
     }
-    return ehiPkcs7UnpadStrict(plaintext, aesBlockSize)
+    if len(ciphertext)%aes.BlockSize != 0 {
+        return nil, errors.New("ciphertext block error")
+    }
+    mode := cipher.NewCBCDecrypter(block, iv)
+    plaintext := make([]byte, len(ciphertext))
+    mode.CryptBlocks(plaintext, ciphertext)
+    return ehiPkcs7UnpadStrict(plaintext, aes.BlockSize)
 }
 
 func ehiCleanInnerFields(config map[string]interface{}, saltKey string) map[string]interface{} {
@@ -1148,7 +1137,14 @@ func darkB64DecodeSafe(data string) ([]byte, error) {
 }
 
 func darkAesCFBDecrypt(data, key, iv []byte) ([]byte, error) {
-    return aesCFBDecrypt(data, key, iv)
+    block, err := aes.NewCipher(key)
+    if err != nil {
+        return nil, err
+    }
+    decrypted := make([]byte, len(data))
+    stream := cipher.NewCFBDecrypter(block, iv)
+    stream.XORKeyStream(decrypted, data)
+    return decrypted, nil
 }
 
 var darkPrintableRe = regexp.MustCompile(`^[^\x00-\x08\x0B\x0C\x0E-\x1F\x7F]*$`)
@@ -1278,16 +1274,11 @@ func darkDecrypt(payload string) (string, error) {
 }
 
 func processDarkContent(data []byte) (*processResult, error) {
-    text := strings.TrimSpace(string(data))
-    jsonOut, err := darkDecrypt(text)
+    jsonOut, err := darkDecrypt(strings.TrimSpace(string(data)))
     if err != nil {
         return nil, err
     }
     res := &processResult{}
     consumeJSONBlob([]byte(jsonOut), res)
-    if uris := scanPlainURIs([]byte(jsonOut)); len(uris) > 0 {
-        res.URIs = append(res.URIs, uris...)
-    }
-    res.URIs = dedupe(res.URIs)
     return res, nil
 }
