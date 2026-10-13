@@ -129,6 +129,11 @@ var (
     reFinger     = regexp.MustCompile(`(?:\\*)"fingerprint(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
     reRemarks    = regexp.MustCompile(`(?:\\*)"remarks(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
     reUUID       = regexp.MustCompile(`(?:\\*)"id(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+
+    // 🆕 پارامترهای REALITY — بدون این‌ها لینک reality قابل اتصال نیست
+    rePbk = regexp.MustCompile(`(?:\\*)"publicKey(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reSid = regexp.MustCompile(`(?:\\*)"shortId(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reSpx = regexp.MustCompile(`(?:\\*)"spiderX(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
 )
 
 func firstGroup(re *regexp.Regexp, s string) string {
@@ -311,6 +316,7 @@ func extractByProfile(text string) []string {
 
 // ═══════════════════ ساخت لینک‌ها ═══════════════════
 
+// 🆕 trojan — با پشتیبانی reality
 func buildTrojanFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
@@ -340,12 +346,25 @@ func buildTrojanFromRegex(window, fullText string) string {
             q.Set("path", p)
         }
     }
-    if sec == "tls" {
+    // 🆕 tls و reality هر دو — sni + fp
+    if sec == "tls" || sec == "reality" {
         if sni := firstGroup(reSNI, window); sni != "" {
             q.Set("sni", sni)
         }
         if fp := firstGroup(reFinger, window); fp != "" {
             q.Set("fp", fp)
+        }
+    }
+    // 🆕 پارامترهای اختصاصی reality
+    if sec == "reality" {
+        if pbk := firstGroup(rePbk, window); pbk != "" {
+            q.Set("pbk", pbk)
+        }
+        if sid := firstGroup(reSid, window); sid != "" {
+            q.Set("sid", sid)
+        }
+        if spx := firstGroup(reSpx, window); spx != "" {
+            q.Set("spx", spx)
         }
     }
 
@@ -358,6 +377,7 @@ func buildTrojanFromRegex(window, fullText string) string {
         url.QueryEscape(pass), formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
+// 🆕 vless — با پشتیبانی کامل REALITY (pbk/sid/spx)
 func buildVlessFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
@@ -388,9 +408,26 @@ func buildVlessFromRegex(window, fullText string) string {
             q.Set("path", p)
         }
     }
-    if sec == "tls" {
+
+    // 🆕 tls و reality هر دو — sni + fp
+    if sec == "tls" || sec == "reality" {
         if sni := firstGroup(reSNI, window); sni != "" {
             q.Set("sni", sni)
+        }
+        if fp := firstGroup(reFinger, window); fp != "" {
+            q.Set("fp", fp)
+        }
+    }
+    // 🆕 پارامترهای اختصاصی reality — بدون این‌ها لینک کار نمی‌کند
+    if sec == "reality" {
+        if pbk := firstGroup(rePbk, window); pbk != "" {
+            q.Set("pbk", pbk)
+        }
+        if sid := firstGroup(reSid, window); sid != "" {
+            q.Set("sid", sid)
+        }
+        if spx := firstGroup(reSpx, window); spx != "" {
+            q.Set("spx", spx)
         }
     }
 
@@ -884,13 +921,13 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
 // ═══════════════════ نقطه ورود ═══════════════════
 
 func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
-    // 🆕 ۱) NPVO1 — حالت «Keep open» (بدون قفل)
+    // ۱) NPVO1 — حالت «Keep open» (بدون قفل)
     if isNpvOpenEnvelope(data) {
         res, err := npvsOpenDecrypt(data)
         return res, err, false
     }
 
-    // 🆕 ۲) NPVT1 / NPVTSUB1 — کانتینر قدیمی → موتور NPVT خود ربات
+    // ۲) NPVT1 / NPVTSUB1 — کانتینر قدیمی → موتور NPVT خود ربات
     if marker := npvLegacyMarkerOf(data); marker != "" {
         text := npvOpenStripMarker(string(data), marker)
         if res := tryNPVT(text); res != nil && (len(res.URIs) > 0 || len(res.Raw) > 0) {
@@ -899,7 +936,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, fmt.Errorf("کانتینر قدیمی %s باز نشد (فایل را با پسوند .npvt بفرست)", marker), false
     }
 
-    // 🆕 ۳) NPVS v5 (Gen2) — هر ۳ متد
+    // ۳) NPVS v5 (Gen2) — هر ۳ متد
     if isNpvGen2Envelope(data) {
         env5, err5 := parseNpvGen2Envelope(data)
         if err5 != nil {
@@ -970,7 +1007,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 }
 
 func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error) {
-    // 🆕 NPVS v5 (Gen2)
+    // NPVS v5 (Gen2)
     if isNpvGen2Envelope(fileData) {
         return npvsGen2Decrypt(fileData, password)
     }
