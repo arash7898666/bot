@@ -791,9 +791,9 @@ func processZIP(data []byte, depth int) (*processResult, error) {
 }
 
 // ═══════════════════ مسیر NPVT — 🆕 با سرهم‌کردن chunk ها ═══════════════════
-// مشکل: کانفیگ‌های بزرگ (مثل DarkTunnel) بین چند توکن تکه‌تکه می‌شوند و
-// هر تیکه به‌تنهایی JSON ناقص است → قبلاً به‌صورت RAW تکه‌تکه خارج می‌شد.
-// فیکس: همه تیکه‌ها را decrypt می‌کنیم، به هم می‌چسبانیم و یکجا consume می‌کنیم.
+// مشکل: کانفیگ‌های بزرگ بین چند توکن تکه‌تکه می‌شوند و هر تیکه به‌تنهایی
+// JSON ناقص است → قبلاً به‌صورت RAW تکه‌تکه خارج می‌شد.
+// فیکس: همه تیکه‌ها decrypt و به هم چسبانده می‌شوند و یکجا consume می‌شوند.
 
 func tryNPVT(text string) *processResult {
     res := &processResult{}
@@ -882,7 +882,8 @@ func consumeJSONBlob(pt []byte, res *processResult) {
     }
 
     objs := splitJSONObjects(parseable)
-    if len(objs) > 1 {
+    // 🆕 > 0 (قبلاً > 1 بود): آبجکت تکی هم parse شود — برای dump های تک-پروفایلی
+    if len(objs) > 0 {
         foundAny := false
         for _, obj := range objs {
             var r any
@@ -1456,7 +1457,7 @@ type streamSettingsT struct {
     WSSettings          *wsSettingsT          `json:"wsSettings"`
     GRPCSettings        *grpcSettingsT        `json:"grpcSettings"`
     KCPSettings         *kcpSettingsT         `json:"kcpSettings"`
-    QUICSettings        *quicSettingsT         `json:"quicSettings"`
+    QUICSettings        *quicSettingsT        `json:"quicSettings"`
     HTTPUpgradeSettings *httpUpgradeSettingsT `json:"httpupgradeSettings"`
     HTTPSettings        *httpSettingsT        `json:"httpSettings"` // برای http/h2
 }
