@@ -11,6 +11,7 @@ import (
     "net/url"
     "os"
     "regexp"
+    "sort"
     "strings"
     "sync"
     "time"
@@ -129,11 +130,10 @@ var (
     reFinger     = regexp.MustCompile(`(?:\\*)"fingerprint(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
     reRemarks    = regexp.MustCompile(`(?:\\*)"remarks(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
     reUUID       = regexp.MustCompile(`(?:\\*)"id(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
-
-    // 🆕 پارامترهای REALITY — بدون این‌ها لینک reality قابل اتصال نیست
-    rePbk = regexp.MustCompile(`(?:\\*)"publicKey(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
-    reSid = regexp.MustCompile(`(?:\\*)"shortId(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
-    reSpx = regexp.MustCompile(`(?:\\*)"spiderX(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    rePublicKey  = regexp.MustCompile(`(?:\\*)"publicKey(?:\\*)"\s*:\s*(?:\\*)"([^"\\]+)(?:\\*)"`)
+    reShortId    = regexp.MustCompile(`(?:\\*)"shortId(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reSpiderX    = regexp.MustCompile(`(?:\\*)"spiderX(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
+    reFlow       = regexp.MustCompile(`(?:\\*)"flow(?:\\*)"\s*:\s*(?:\\*)"([^"\\]*)(?:\\*)"`)
 )
 
 func firstGroup(re *regexp.Regexp, s string) string {
@@ -198,16 +198,35 @@ func npvsNoLinkMessage() string {
 
 // ═══════════════════ استخراج ═══════════════════
 
+// uriKey — کلید یکتایی لینک برای dedupe.
+// 🆕 فیکس «۷ کانفیگ داخل، ۳ خروجی»: نسخه قدیمی هرچی بعد از ?/# بود حذف می‌کرد،
+// پس کانفیگ‌هایی که فقط در path/sni/pbk/sid/flow فرق داشتند تکراری شمرده و
+// بی‌صدا حذف می‌شدند. نسخه جدید فقط fragment (اسم کانفیگ بعد از #) را حذف
+// می‌کند و query را نگه می‌دارد (پارامترها مرتب می‌شوند تا ترتیب تفاوت ایجاد
+// نکند). pbk/sid/spx/path/host/sni/flow تفاوت واقعی کانفیگ‌اند.
 func uriKey(u string) string {
     i := strings.Index(u, "://")
     if i < 0 {
         return u
     }
     rest := u[i+3:]
-    if j := strings.IndexAny(rest, "?#"); j >= 0 {
+    // fragment (نام/remarks) حذف می‌شود — یک اتصال با دو اسم فقط یکی شمرده می‌شود
+    if j := strings.IndexByte(rest, '#'); j >= 0 {
         rest = rest[:j]
     }
-    return rest
+    scheme := u[:i]
+    base := rest
+    query := ""
+    if j := strings.IndexByte(rest, '?'); j >= 0 {
+        base = rest[:j]
+        query = rest[j+1:]
+    }
+    if query != "" {
+        parts := strings.Split(query, "&")
+        sort.Strings(parts)
+        query = strings.Join(parts, "&")
+    }
+    return scheme + "://" + base + "?" + query
 }
 
 func dedupeByURI(in []string) []string {
@@ -316,7 +335,6 @@ func extractByProfile(text string) []string {
 
 // ═══════════════════ ساخت لینک‌ها ═══════════════════
 
-// 🆕 trojan — با پشتیبانی reality
 func buildTrojanFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
@@ -334,7 +352,25 @@ func buildTrojanFromRegex(window, fullText string) string {
     if netw != "" {
         q.Set("type", netw)
     }
-    sec := firstGroup(reSecurity, window)
+    // 🆕 انتخاب بهترین security (reality > tls > none) بین چند تطبیق
+    sec := ""
+    for _, m := range reSecurity.FindAllStringSubmatch(window, -1) {
+        switch strings.ToLower(m[1]) {
+        case "reality":
+            sec = "reality"
+        case "tls":
+            if sec == "" || sec == "none" {
+                sec = "tls"
+            }
+        case "none":
+            if sec == "" {
+                sec = "none"
+            }
+        }
+    }
+    if pbk := firstGroup(rePublicKey, window); pbk != "" {
+        sec = "reality"
+    }
     if sec != "" {
         q.Set("security", sec)
     }
@@ -346,25 +382,30 @@ func buildTrojanFromRegex(window, fullText string) string {
             q.Set("path", p)
         }
     }
-    // 🆕 tls و reality هر دو — sni + fp
-    if sec == "tls" || sec == "reality" {
+    // 🆕 reality روی trojan (نادر ولی ممکن)
+    switch sec {
+    case "reality":
+        if pbk := firstGroup(rePublicKey, window); pbk != "" {
+            q.Set("pbk", pbk)
+        }
+        if sid := firstGroup(reShortId, window); sid != "" {
+            q.Set("sid", sid)
+        }
         if sni := firstGroup(reSNI, window); sni != "" {
             q.Set("sni", sni)
         }
         if fp := firstGroup(reFinger, window); fp != "" {
             q.Set("fp", fp)
         }
-    }
-    // 🆕 پارامترهای اختصاصی reality
-    if sec == "reality" {
-        if pbk := firstGroup(rePbk, window); pbk != "" {
-            q.Set("pbk", pbk)
+    case "tls":
+        if sni := firstGroup(reSNI, window); sni != "" {
+            q.Set("sni", sni)
         }
-        if sid := firstGroup(reSid, window); sid != "" {
-            q.Set("sid", sid)
+        if fp := firstGroup(reFinger, window); fp != "" {
+            q.Set("fp", fp)
         }
-        if spx := firstGroup(reSpx, window); spx != "" {
-            q.Set("spx", spx)
+        if fl := firstGroup(reFlow, window); fl != "" {
+            q.Set("flow", fl)
         }
     }
 
@@ -377,7 +418,6 @@ func buildTrojanFromRegex(window, fullText string) string {
         url.QueryEscape(pass), formatHost(addr), port, formatQuery(q), cleanRemarks(remarks))
 }
 
-// 🆕 vless — با پشتیبانی کامل REALITY (pbk/sid/spx)
 func buildVlessFromRegex(window, fullText string) string {
     addr := firstGroup(reAddress, window)
     port := firstGroup(rePort, window)
@@ -396,7 +436,26 @@ func buildVlessFromRegex(window, fullText string) string {
     if netw != "" {
         q.Set("type", netw)
     }
-    sec := firstGroup(reSecurity, window)
+    // 🆕 ممکن است چند «security» در window باشد (users[].security=auto و
+    // streamSettings.security) — بهترین مقدار شناخته‌شده انتخاب می‌شود
+    sec := ""
+    for _, m := range reSecurity.FindAllStringSubmatch(window, -1) {
+        switch strings.ToLower(m[1]) {
+        case "reality":
+            sec = "reality"
+        case "tls":
+            if sec == "" || sec == "none" {
+                sec = "tls"
+            }
+        case "none":
+            if sec == "" {
+                sec = "none"
+            }
+        }
+    }
+    if pbk := firstGroup(rePublicKey, window); pbk != "" {
+        sec = "reality"
+    }
     if sec != "" {
         q.Set("security", sec)
     }
@@ -408,26 +467,36 @@ func buildVlessFromRegex(window, fullText string) string {
             q.Set("path", p)
         }
     }
-
-    // 🆕 tls و reality هر دو — sni + fp
-    if sec == "tls" || sec == "reality" {
+    // 🆕 reality: بدون pbk/sid لینک vless واقعاً وصل نمی‌شود
+    switch sec {
+    case "reality":
+        if pbk := firstGroup(rePublicKey, window); pbk != "" {
+            q.Set("pbk", pbk)
+        }
+        if sid := firstGroup(reShortId, window); sid != "" {
+            q.Set("sid", sid)
+        }
+        if spx := firstGroup(reSpiderX, window); spx != "" {
+            q.Set("spx", spx)
+        }
         if sni := firstGroup(reSNI, window); sni != "" {
             q.Set("sni", sni)
         }
         if fp := firstGroup(reFinger, window); fp != "" {
             q.Set("fp", fp)
         }
-    }
-    // 🆕 پارامترهای اختصاصی reality — بدون این‌ها لینک کار نمی‌کند
-    if sec == "reality" {
-        if pbk := firstGroup(rePbk, window); pbk != "" {
-            q.Set("pbk", pbk)
+        if fl := firstGroup(reFlow, window); fl != "" {
+            q.Set("flow", fl)
         }
-        if sid := firstGroup(reSid, window); sid != "" {
-            q.Set("sid", sid)
+    case "tls":
+        if sni := firstGroup(reSNI, window); sni != "" {
+            q.Set("sni", sni)
         }
-        if spx := firstGroup(reSpx, window); spx != "" {
-            q.Set("spx", spx)
+        if fp := firstGroup(reFinger, window); fp != "" {
+            q.Set("fp", fp)
+        }
+        if fl := firstGroup(reFlow, window); fl != "" {
+            q.Set("flow", fl)
         }
     }
 
@@ -921,13 +990,13 @@ func npvsOpenBody(dek, nonce, body, aad []byte) ([]byte, error) {
 // ═══════════════════ نقطه ورود ═══════════════════
 
 func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
-    // ۱) NPVO1 — حالت «Keep open» (بدون قفل)
+    // 🆕 ۱) NPVO1 — حالت «Keep open» (بدون قفل)
     if isNpvOpenEnvelope(data) {
         res, err := npvsOpenDecrypt(data)
         return res, err, false
     }
 
-    // ۲) NPVT1 / NPVTSUB1 — کانتینر قدیمی → موتور NPVT خود ربات
+    // 🆕 ۲) NPVT1 / NPVTSUB1 — کانتینر قدیمی → موتور NPVT خود ربات
     if marker := npvLegacyMarkerOf(data); marker != "" {
         text := npvOpenStripMarker(string(data), marker)
         if res := tryNPVT(text); res != nil && (len(res.URIs) > 0 || len(res.Raw) > 0) {
@@ -936,7 +1005,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
         return nil, fmt.Errorf("کانتینر قدیمی %s باز نشد (فایل را با پسوند .npvt بفرست)", marker), false
     }
 
-    // ۳) NPVS v5 (Gen2) — هر ۳ متد
+    // 🆕 ۳) NPVS v5 (Gen2) — هر ۳ متد
     if isNpvGen2Envelope(data) {
         env5, err5 := parseNpvGen2Envelope(data)
         if err5 != nil {
@@ -1007,7 +1076,7 @@ func handleNPVS(data []byte, chatID int64) (*processResult, error, bool) {
 }
 
 func tryNPVSPassphrase(fileData []byte, password string) (*processResult, error) {
-    // NPVS v5 (Gen2)
+    // 🆕 NPVS v5 (Gen2)
     if isNpvGen2Envelope(fileData) {
         return npvsGen2Decrypt(fileData, password)
     }
