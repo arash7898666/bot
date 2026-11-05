@@ -790,10 +790,7 @@ func processZIP(data []byte, depth int) (*processResult, error) {
     return res, nil
 }
 
-// ═══════════════════ مسیر NPVT — 🆕 با سرهم‌کردن chunk ها ═══════════════════
-// مشکل: کانفیگ‌های بزرگ بین چند توکن تکه‌تکه می‌شوند و هر تیکه به‌تنهایی
-// JSON ناقص است → قبلاً به‌صورت RAW تکه‌تکه خارج می‌شد.
-// فیکس: همه تیکه‌ها decrypt و به هم چسبانده می‌شوند و یکجا consume می‌شوند.
+// ═══════════════════ مسیر NPVT ═══════════════════
 
 func tryNPVT(text string) *processResult {
     res := &processResult{}
@@ -803,8 +800,8 @@ func tryNPVT(text string) *processResult {
         tokens = strings.FieldsFunc(text, func(r rune) bool { return r == '\n' || r == '\r' })
     }
 
-    // ─── فاز ۱: decode/decrypt همه توکن‌ها — فقط جمع‌آوری ───
-    var parts []string
+    decoded := 0
+    var parts [][]byte
     for _, tok := range tokens {
         tok = strings.TrimSpace(tok)
         if tok == "" {
@@ -814,6 +811,7 @@ func tryNPVT(text string) *processResult {
         if err != nil {
             continue
         }
+        decoded++
         if len(b) < 16 {
             continue
         }
@@ -824,23 +822,23 @@ func tryNPVT(text string) *processResult {
         if !isMostlyPrintable(pt) {
             continue
         }
-        parts = append(parts, string(pt))
+        parts = append(parts, pt)
     }
-    if len(parts) == 0 {
+
+    if decoded == 0 {
         return nil
     }
 
-    // ─── فاز ۲: 🆕 سرهم‌کردن — کل استریم را یکجا consume کن ───
-    // فرمت key=value مثل «addedTime=... v2rayJson={...}» هم جواب می‌دهد چون
-    // splitJSONObjects داخل consumeJSONBlob آبجکت‌های کامل را جدا می‌کند.
-    if joined := strings.Join(parts, ""); len(joined) < 48<<20 {
-        consumeJSONBlob([]byte(joined), res)
+    // 🆕 فاز ۱: مونتاژ مجدد — کل استریم یکجا پردازش می‌شود تا JSON های
+    // چندتکه (کانفیگ‌های chunk شده) کامل دیده شوند
+    if joined := bytes.Join(parts, []byte("")); len(joined) > 0 && len(joined) < 48<<20 {
+        consumeJSONBlob(joined, res)
     }
 
-    // ─── فاز ۳: fallback — رفتار قدیمی (هر تیکه جدا) فقط اگر فاز ۲ خالی بود ───
+    // 🆕 فاز ۲: رفتار قدیمی — هر تکه جدا (وقتی مونتاژ چیزی نگرفت)
     if len(res.URIs) == 0 && len(res.Raw) == 0 {
-        for _, p := range parts {
-            consumeJSONBlob([]byte(p), res)
+        for _, pt := range parts {
+            consumeJSONBlob(pt, res)
         }
     }
 
@@ -882,7 +880,7 @@ func consumeJSONBlob(pt []byte, res *processResult) {
     }
 
     objs := splitJSONObjects(parseable)
-    // 🆕 > 0 (قبلاً > 1 بود): آبجکت تکی هم parse شود — برای dump های تک-پروفایلی
+    // 🆕 > 0 به‌جای > 1: حتی یک آبجکت جاسازی‌شده (مثل v2rayJson داخل dump) parse شود
     if len(objs) > 0 {
         foundAny := false
         for _, obj := range objs {
@@ -1270,7 +1268,7 @@ func npvDecodeSentinelsStr(s string) string {
     return s
 }
 
-// ═══════════════════ FlexInt — پورت رشته‌ای/عددی هر دو ═══════════════════
+// ═══════════════════ 🆕 FlexInt — پورت رشته‌ای/عددی هر دو ═══════════════════
 
 type FlexInt int
 
@@ -1332,7 +1330,7 @@ func cleanEmbeddedJSON(c string) []byte {
     return []byte(c3)
 }
 
-// walkJSON — sentinel-aware + دیباگ v2rayJson string parse
+// 🆕 walkJSON — sentinel-aware + دیباگ v2rayJson string parse
 func walkJSON(v any, uris *[]string) {
     switch x := v.(type) {
     case map[string]any:
@@ -1345,7 +1343,7 @@ func walkJSON(v any, uris *[]string) {
                     if u, err := extractURIsFromConfig(clean); err == nil {
                         *uris = append(*uris, u...)
                     } else {
-                        // دیباگ: چرا پارس شکست خورد؟
+                        // 🆕 دیباگ: چرا پارس شکست خورد؟
                         head := string(clean)
                         if len(head) > 120 {
                             head = head[:120]
@@ -1444,6 +1442,12 @@ type httpUpgradeSettingsT struct {
     Host string `json:"host"`
 }
 
+// 🆕 برای کانفیگ‌های hyq (vless روی hysteria در DarkTunnel)
+type hysteriaSettingsT struct {
+    Auth    string `json:"auth"`
+    Version string `json:"version"`
+}
+
 type httpSettingsT struct {
     Path string `json:"path"`
     Host string `json:"host"`
@@ -1459,7 +1463,8 @@ type streamSettingsT struct {
     KCPSettings         *kcpSettingsT         `json:"kcpSettings"`
     QUICSettings        *quicSettingsT        `json:"quicSettings"`
     HTTPUpgradeSettings *httpUpgradeSettingsT `json:"httpupgradeSettings"`
-    HTTPSettings        *httpSettingsT        `json:"httpSettings"` // برای http/h2
+    HTTPSettings        *httpSettingsT        `json:"httpSettings"`     // 🆕 برای http/h2
+    HysteriaSettings    *hysteriaSettingsT    `json:"hysteriaSettings"` // 🆕 hyq
 }
 
 type vnextUserT struct {
@@ -1481,11 +1486,11 @@ type vnextSettingsT struct {
 }
 
 type serverEntryT struct {
-    Address  string  `json:"address"`
+    Address  string `json:"address"`
     Port     FlexInt `json:"port"`
-    Password string  `json:"password"`
-    Method   string  `json:"method"`
-    Flow     string  `json:"flow"`
+    Password string `json:"password"`
+    Method   string `json:"method"`
+    Flow     string `json:"flow"`
 }
 
 type serversSettingsT struct {
@@ -1545,7 +1550,7 @@ func formatQuery(q url.Values) string {
     return s
 }
 
-// npvHostFromHeaders — Host از headers (map[string]string) بدون حساسیت حروف
+// 🆕 npvHostFromHeaders — Host از headers (map[string]string) بدون حساسیت حروف
 func npvHostFromHeaders(h map[string]string) string {
     for k, v := range h {
         if strings.EqualFold(k, "Host") && strings.TrimSpace(v) != "" {
@@ -1619,7 +1624,7 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
                 q.Set("host", ss.HTTPUpgradeSettings.Host)
             }
         }
-    case "http", "h2", "xhttp": // پشتیبانی http/h2/xhttp
+    case "http", "h2", "xhttp": // 🆕 پشتیبانی http/h2/xhttp
         if ss.HTTPSettings != nil {
             if ss.HTTPSettings.Host != "" {
                 q.Set("host", ss.HTTPSettings.Host)
@@ -1668,10 +1673,32 @@ func buildStreamQuery(ss *streamSettingsT) url.Values {
     return q
 }
 
-// vlessURI — همه کاربران/سرورها
+// 🆕 vlessURI — همه کاربران/سرورها + تبدیل hyq به hysteria2
 func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
     if len(vs.Vnext) == 0 {
         return nil, fmt.Errorf("vless: missing user")
+    }
+    // 🆕 vless روی hysteria (hyq) → لینک استاندارد hysteria2 قابل اتصال
+    if strings.EqualFold(ss.Network, "hysteria") && ss.HysteriaSettings != nil &&
+        strings.TrimSpace(ss.HysteriaSettings.Auth) != "" && len(vs.Vnext) > 0 {
+        v := vs.Vnext[0]
+        if v.Address != "" && v.Port > 0 {
+            q := url.Values{}
+            if ss.TLSSettings != nil {
+                if ss.TLSSettings.ServerName != "" {
+                    q.Set("sni", ss.TLSSettings.ServerName)
+                }
+                if len(ss.TLSSettings.Alpn) > 0 {
+                    q.Set("alpn", strings.Join(ss.TLSSettings.Alpn, ","))
+                }
+                if ss.TLSSettings.AllowInsecure {
+                    q.Set("insecure", "1")
+                }
+            }
+            return []string{fmt.Sprintf("hysteria2://%s@%s:%d?%s#%s",
+                escapeUserInfo(strings.TrimSpace(ss.HysteriaSettings.Auth)),
+                formatHost(v.Address), v.Port, formatQuery(q), cleanRemarks(remarks))}, nil
+        }
     }
     var uris []string
     for _, v := range vs.Vnext {
@@ -1695,7 +1722,7 @@ func vlessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string,
     return uris, nil
 }
 
-// vmessURI — همه کاربران + aid واقعی از AlterId
+// 🆕 vmessURI — همه کاربران + aid واقعی از AlterId
 func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
     if len(vs.Vnext) == 0 {
         return nil, fmt.Errorf("vmess: missing user")
@@ -1768,7 +1795,7 @@ func vmessURI(vs vnextSettingsT, ss *streamSettingsT, remarks string) ([]string,
     return uris, nil
 }
 
-// trojanURI — همه سرورها
+// 🆕 trojanURI — همه سرورها
 func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) ([]string, error) {
     if len(ts.Servers) == 0 {
         return nil, fmt.Errorf("trojan: missing server")
@@ -1785,7 +1812,7 @@ func trojanURI(ts serversSettingsT, ss *streamSettingsT, remarks string) ([]stri
     return uris, nil
 }
 
-// shadowsocksURI — همه سرورها
+// 🆕 shadowsocksURI — همه سرورها
 func shadowsocksURI(ts serversSettingsT, remarks string) ([]string, error) {
     if len(ts.Servers) == 0 {
         return nil, fmt.Errorf("ss: missing server")
@@ -1880,7 +1907,7 @@ func extractURIsFromConfig(pt []byte) ([]string, error) {
     return uris, nil
 }
 
-// extractFromV2rayProfile — فیکس json.RawMessage (بدون مقایسه با رشته)
+// 🔧 extractFromV2rayProfile — fیکس json.RawMessage (بدون مقایسه با رشته)
 func extractFromV2rayProfile(b []byte) ([]string, error) {
     var p napsternetProfile
     _ = json.Unmarshal(b, &p)
