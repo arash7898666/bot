@@ -436,7 +436,7 @@ func npvGen2Frag(rem string) string {
     return "#" + url.PathEscape(rem)
 }
 
-// 🆕 npvHostFromHeadersAny — Host از headers (map[string]any) بدون حساسیت حروف
+// npvHostFromHeadersAny — Host از headers (map[string]any) بدون حساسیت حروف
 func npvHostFromHeadersAny(h map[string]any) string {
     for k, v := range h {
         if strings.EqualFold(k, "Host") {
@@ -448,7 +448,7 @@ func npvHostFromHeadersAny(h map[string]any) string {
     return ""
 }
 
-// 🆕 npvGen2FixExtraJSON — بازگرداندن تایپ bool/number در extra xhttp
+// npvGen2FixExtraJSON — بازگرداندن تایپ bool/number در extra xhttp
 // (اپ مقادیر را به‌صورت رشته ذخیره می‌کند؛ Xray سخت‌گیر است)
 func npvGen2FixExtraJSON(s string) string {
     s = strings.TrimSpace(s)
@@ -500,9 +500,18 @@ func npvGen2CoerceExtra(m map[string]any) {
     }
 }
 
-// ─── 🆕 پارسر مستقیم v2rayJson — با پشتیبانی sentinel ───
+// ─── 🆕 پارسر مستقیم v2rayJson — پشتیبانی sentinel + آرایه chunk ───
 
 func npvGen2V2RayJSONLinks(raw any) []string {
+    // 🆕 v2rayJson چانک‌شده (آرایه‌ای از تکه‌ها) → تکه‌ها را به هم می‌چسبانیم
+    if arr, ok := raw.([]any); ok {
+        var sb strings.Builder
+        for _, p := range arr {
+            sb.WriteString(npvGen2Text(p))
+        }
+        raw = sb.String()
+    }
+
     var root map[string]any
     switch v := raw.(type) {
     case string:
@@ -512,6 +521,8 @@ func npvGen2V2RayJSONLinks(raw any) []string {
         // decode sentinel (belt-and-suspenders برای مسیرهای مشترک)
         v = npvDecodeSentinelsStr(v)
         if err := json.Unmarshal([]byte(cleanEmbeddedJSON(v)), &root); err != nil {
+            // 🆕 دیباگ: دقیقاً معلوم شود چرا پارس شکست خورده
+            log.Printf("[NPVS-GEN2] ⚠️ v2rayJson parse failed: %v | head=%s", err, debugPreview(v, 160))
             return nil
         }
     case map[string]any:
@@ -583,7 +594,7 @@ func npvGen2OutboundToURI(proto string, ob map[string]any, remarks string) strin
         method = npvGen2Or(npvGen2GetStr(u, "security"), "auto")
         alterID = npvGen2GetInt(u, "alterId")
     }
-    // 🔧 اعتبارسنجی inline (بدون وابستگی به main.go)
+    // اعتبارسنجی inline (بدون وابستگی به main.go)
     if host == "" || port < 1 || port > 65535 || password == "" ||
         strings.ContainsAny(strings.TrimSpace(host), " \t\r\n") {
         return ""
@@ -751,7 +762,7 @@ func npvGen2Link(cfg any) string {
     remarks := npvGen2Text(obj["name"])
     address := npvGen2Text(obj["address"])
 
-    // لایه ۱: پارسر مستقیم v2rayJson (رشته یا آبجکت — پورت رشته‌ای هم می‌فهمد)
+    // لایه ۱: پارسر مستقیم v2rayJson (رشته، آبجکت یا 🆕 آرایه chunk — پورت رشته‌ای هم می‌فهمد)
     for _, key := range []string{"v2rayJson", "v2rRawJson"} {
         if uris := npvGen2V2RayJSONLinks(obj[key]); len(uris) > 0 {
             return strings.Join(uris, "\n")
@@ -1140,6 +1151,16 @@ func npvGen2RawFields(fields map[uint16][]byte) string {
 
 // ═══════ ورودی Gen2 برای ربات ═══════
 
+// 🆕 تشخیص لینک واقعی از بلوک متنی — scheme باید اول رشته باشد
+// (dump ها «://» دارند ولی عمیق داخل متن، مثلاً tcp://77.88.8.8)
+func npvGen2IsLink(s string) bool {
+    i := strings.Index(s, "://")
+    return i > 0 && i <= 12
+}
+
+// 🆕 نسخه جدید: لینک واقعی از بلوک متنی جدا می‌شود؛ بلوک متنی از موتور JSON
+// رد می‌شود (splitJSONObjects → walkJSON → outbounds) تا لینک کامل با
+// pbk/sid/spx/flow ساخته شود — قبلاً dump متنی به‌عنوان «کانفیگ» شمرده می‌شد.
 func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err error) {
     defer func() {
         if r := recover(); r != nil {
@@ -1198,8 +1219,35 @@ func npvsGen2Decrypt(fileData []byte, password string) (res *processResult, err 
                 }
             }
         }
-        res.URIs = dedupeByURI(flat)
-        log.Printf("[NPVS-GEN2] ✅ %d کانفیگ استخراج شد", len(res.URIs))
+
+        // 🆕 تفکیک: لینک واقعی vs بلوک متنی (dump از نوع KeyValues)
+        var uris, textBlocks []string
+        for _, f := range flat {
+            if npvGen2IsLink(f) {
+                uris = append(uris, f)
+            } else {
+                textBlocks = append(textBlocks, f)
+            }
+        }
+
+        // 🆕 بلوک متنی؟ v2rayJson کامل داخلش است — از موتور JSON ردش کن
+        for _, tb := range textBlocks {
+            sub := &processResult{}
+            consumeJSONBlob([]byte(tb), sub)
+            if len(sub.URIs) > 0 {
+                log.Printf("[NPVS-GEN2] 🔁 %d لینک از بلوک متنی بازیابی شد", len(sub.URIs))
+            }
+            uris = append(uris, sub.URIs...)
+        }
+
+        res.URIs = dedupeByURI(uris)
+        if len(res.URIs) > 0 {
+            log.Printf("[NPVS-GEN2] ✅ %d کانفیگ استخراج شد", len(res.URIs))
+            return res, nil
+        }
+
+        // هیچ لینکی نبود — بلوک‌های متنی به‌عنوان RAW نمایش داده شوند
+        res.Raw = append(res.Raw, textBlocks...)
         return res, nil
     }
     if text := npvGen2RawFields(fields); text != "" {
